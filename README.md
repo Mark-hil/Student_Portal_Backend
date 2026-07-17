@@ -11,7 +11,6 @@ The backend API for the UniPortal student portal, built with **Django 5 + DRF**.
 
 ## Project structure
 ```
-backend/
 ├── apps/
 │   ├── users/          # Custom user model, auth views
 │   ├── courses/        # Course catalog, enrollment, registration service

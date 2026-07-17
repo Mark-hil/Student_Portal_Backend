@@ -1,0 +1,35 @@
+# Environments
+.env
+.env.local
+.venv
+venv/
+ENV/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+db.sqlite3
+
+# Django Media/Static
+media/
+static/
+
+# Celery
+celerybeat-schedule.db
+celerybeat-schedule.db.bak
+celerybeat-schedule.db.dat
+celerybeat-schedule.db.dir
+
+# Logs
+*.log
+
+# IDEs / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

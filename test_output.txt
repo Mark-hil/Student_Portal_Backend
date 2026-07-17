@@ -1,0 +1,55 @@
+============================= test session starts ==============================
+platform linux -- Python 3.10.12, pytest-8.1.1, pluggy-1.6.0
+django: version: 5.0.4, settings: config.settings.development (from ini)
+rootdir: /home/chillop/project/student-portal/backend
+configfile: pytest.ini
+plugins: django-4.8.0
+collected 5 items
+
+apps/courses/tests/test_registration.py .F.F.                            [100%]
+
+=================================== FAILURES ===================================
+______________ TestRegistrationEngine.test_credit_limit_exceeded _______________
+apps/courses/tests/test_registration.py:30: in test_credit_limit_exceeded
+    with pytest.raises(RegistrationError) as exc:
+E   Failed: DID NOT RAISE <class 'apps.courses.registration.RegistrationError'>
+----------------------------- Captured stderr call -----------------------------
+[2026-07-10 03:57:01,269] INFO apps.courses.registration Registration: student=student@test.com course=CS1 status=active semester=FA24
+[2026-07-10 03:57:01,272] DEBUG apps.notifications.tasks Notification created for user bd0e6043-fe8e-4ffe-b7c8-0ec28c10ba32: Registration Confirmed
+[2026-07-10 03:57:01,272] INFO celery.app.trace Task apps.notifications.tasks.create_notification[d55e840c-e901-48fe-99f0-79fe9583c113] succeeded in 0.0018308769995201146s: None
+[2026-07-10 03:57:01,277] INFO apps.notifications.tasks Email sent to student@test.com: [UniPortal] Registration Confirmed: CS1
+[2026-07-10 03:57:01,277] INFO celery.app.trace Task apps.notifications.tasks.send_email_notification[f9679e6d-80b3-45a9-991d-107804f0a612] succeeded in 0.0037498600004255422s: None
+[2026-07-10 03:57:01,292] INFO apps.courses.registration Registration: student=student@test.com course=CS2 status=active semester=FA24
+[2026-07-10 03:57:01,295] DEBUG apps.notifications.tasks Notification created for user bd0e6043-fe8e-4ffe-b7c8-0ec28c10ba32: Registration Confirmed
+[2026-07-10 03:57:01,295] INFO celery.app.trace Task apps.notifications.tasks.create_notification[1b156ae5-04a8-4553-ad13-8e22560aee1c] succeeded in 0.0017002940003294498s: None
+[2026-07-10 03:57:01,299] INFO apps.notifications.tasks Email sent to student@test.com: [UniPortal] Registration Confirmed: CS2
+[2026-07-10 03:57:01,300] INFO celery.app.trace Task apps.notifications.tasks.send_email_notification[edaa819b-072d-43c1-9169-749522416857] succeeded in 0.0035412070001257234s: None
+________________ TestRegistrationEngine.test_schedule_conflict _________________
+apps/courses/tests/test_registration.py:52: in test_schedule_conflict
+    with pytest.raises(RegistrationError) as exc:
+E   Failed: DID NOT RAISE <class 'apps.courses.registration.RegistrationError'>
+----------------------------- Captured stderr call -----------------------------
+[2026-07-10 03:57:03,747] INFO apps.courses.registration Registration: student=student@test.com course=CS1 status=active semester=FA24
+[2026-07-10 03:57:03,749] DEBUG apps.notifications.tasks Notification created for user 667c82c0-7752-4442-bd71-5e4e6849b8a5: Registration Confirmed
+[2026-07-10 03:57:03,749] INFO celery.app.trace Task apps.notifications.tasks.create_notification[470a7b6b-5066-4ff1-b8ad-23edc9674bb6] succeeded in 0.0011601280002651038s: None
+[2026-07-10 03:57:03,752] INFO apps.notifications.tasks Email sent to student@test.com: [UniPortal] Registration Confirmed: CS1
+[2026-07-10 03:57:03,752] INFO celery.app.trace Task apps.notifications.tasks.send_email_notification[9d6154e5-8aa8-4765-8841-a6ae98224db8] succeeded in 0.002405795999948168s: None
+[2026-07-10 03:57:03,765] INFO apps.courses.registration Registration: student=student@test.com course=CS2 status=active semester=FA24
+[2026-07-10 03:57:03,767] DEBUG apps.notifications.tasks Notification created for user 667c82c0-7752-4442-bd71-5e4e6849b8a5: Registration Confirmed
+[2026-07-10 03:57:03,767] INFO celery.app.trace Task apps.notifications.tasks.create_notification[bf89783b-6134-4c15-b5d9-d82ef3b4d7a5] succeeded in 0.0010861370001293835s: None
+[2026-07-10 03:57:03,770] INFO apps.notifications.tasks Email sent to student@test.com: [UniPortal] Registration Confirmed: CS2
+[2026-07-10 03:57:03,770] INFO celery.app.trace Task apps.notifications.tasks.send_email_notification[28840f68-333f-4ec5-9b62-66babdd664b7] succeeded in 0.0023889940002845833s: None
+=============================== warnings summary ===============================
+.venv/lib/python3.10/site-packages/django/conf/__init__.py:240
+  /home/chillop/project/student-portal/backend/.venv/lib/python3.10/site-packages/django/conf/__init__.py:240: RemovedInDjango51Warning: The DEFAULT_FILE_STORAGE setting is deprecated. Use STORAGES instead.
+    warnings.warn(DEFAULT_FILE_STORAGE_DEPRECATED_MSG, RemovedInDjango51Warning)
+
+.venv/lib/python3.10/site-packages/django/conf/__init__.py:251
+  /home/chillop/project/student-portal/backend/.venv/lib/python3.10/site-packages/django/conf/__init__.py:251: RemovedInDjango51Warning: The STATICFILES_STORAGE setting is deprecated. Use STORAGES instead.
+    warnings.warn(STATICFILES_STORAGE_DEPRECATED_MSG, RemovedInDjango51Warning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED apps/courses/tests/test_registration.py::TestRegistrationEngine::test_credit_limit_exceeded
+FAILED apps/courses/tests/test_registration.py::TestRegistrationEngine::test_schedule_conflict
+=================== 2 failed, 3 passed, 2 warnings in 9.08s ====================

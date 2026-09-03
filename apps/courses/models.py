@@ -42,6 +42,41 @@ class RegistrationWindow(models.Model):
         now = timezone.now()
         return self.is_active and self.opens_at <= now <= self.closes_at
 
+    @property
+    def status_label(self):
+        now = timezone.now()
+        if not self.is_active:
+            return "inactive"
+        if now < self.opens_at:
+            return "upcoming"
+        if now > self.closes_at:
+            return "closed"
+        return "open"
+
+    def extend(self, days=7):
+        """Extend registration closing date by a number of days."""
+        from datetime import timedelta
+        now = timezone.now()
+        base = max(self.closes_at, now)
+        self.closes_at = base + timedelta(days=days)
+        self.is_active = True
+        self.save(update_fields=["closes_at", "is_active"])
+        return self
+
+    def reopen(self, new_closes_at=None, days=7):
+        """Reopen registration window for students who missed it."""
+        from datetime import timedelta
+        now = timezone.now()
+        if new_closes_at:
+            self.closes_at = new_closes_at
+        else:
+            self.closes_at = now + timedelta(days=days)
+        if self.opens_at > now:
+            self.opens_at = now
+        self.is_active = True
+        self.save(update_fields=["opens_at", "closes_at", "is_active"])
+        return self
+
 
 class Course(models.Model):
     class Status(models.TextChoices):

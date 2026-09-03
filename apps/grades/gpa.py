@@ -66,10 +66,12 @@ def recompute_student_gpas(student, semester: str, semester_label: str) -> dict:
         if res["letter"] is None:
             continue
         qp = (res["grade_points"] or Decimal("0")) * Decimal(str(enr.course.credits))
+        pct_val = Decimal(str(res["percentage"])) if res.get("percentage") is not None else None
         Transcript.objects.update_or_create(
             student=student, course=enr.course, semester=semester,
             defaults={
                 "semester_label":  semester_label,
+                "score_percentage": pct_val,
                 "final_grade":     res["letter"],
                 "grade_points":    res["grade_points"],
                 "credits_attempted": enr.course.credits,

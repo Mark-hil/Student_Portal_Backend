@@ -11,10 +11,15 @@ User = get_user_model()
 
 @database_sync_to_async
 def get_user_from_token(token):
+    if not token or not isinstance(token, str) or token.strip() == "":
+        return AnonymousUser()
     try:
-        access_token = AccessToken(token)
-        user = User.objects.get(id=access_token['user_id'])
-        return user
+        clean_token = token.strip().strip('"\'')
+        access_token = AccessToken(clean_token)
+        user_id = access_token.get('user_id') or access_token.get('sub')
+        if not user_id:
+            return AnonymousUser()
+        return User.objects.get(id=user_id)
     except Exception:
         return AnonymousUser()
 
@@ -24,10 +29,10 @@ class JWTAuthMiddleware(BaseMiddleware):
         
         query_string = scope.get("query_string", b"").decode("utf-8")
         query_params = parse_qs(query_string)
-        token = query_params.get("token")
+        token_list = query_params.get("token")
         
-        if token:
-            scope["user"] = await get_user_from_token(token[0])
+        if token_list and len(token_list) > 0 and token_list[0]:
+            scope["user"] = await get_user_from_token(token_list[0])
         else:
             scope["user"] = AnonymousUser()
             

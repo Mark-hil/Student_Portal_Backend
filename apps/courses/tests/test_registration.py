@@ -71,3 +71,18 @@ class TestRegistrationEngine:
         
         enr.refresh_from_db()
         assert enr.status == "active"
+
+    def test_drop_and_re_enroll(self, student, course):
+        svc = RegistrationService(student, "FA24")
+        enr = svc.register(course)
+        assert enr.status == "active"
+        
+        # Student drops
+        dropped = svc.drop(enr)
+        assert dropped.status == "dropped"
+        
+        # Student re-registers for the same course
+        re_enr = svc.register(course)
+        assert re_enr.status == "active"
+        assert re_enr.dropped_at is None
+        assert Enrollment.objects.filter(student=student, course=course).count() == 1

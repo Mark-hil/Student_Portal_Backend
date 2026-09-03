@@ -15,7 +15,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
-from .models import Course, Enrollment, CourseSchedule
+from .models import Course, Enrollment, CourseSchedule, RegistrationWindow
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,7 @@ class RegistrationService:
     # ── validation ──────────────────────────────────────────────────────────
 
     def _validate(self, course: Course):
+        self._check_registration_window(course)
         self._check_course_active(course)
         self._check_already_enrolled(course)
         self._check_prerequisites(course)
@@ -89,6 +90,31 @@ class RegistrationService:
         self._check_schedule_conflict(course)
         # Capacity check is last — least expensive rejection first
         self._check_capacity(course)
+
+    def _check_registration_window(self, course: Course):
+        semester = course.semester or self.semester
+        if not semester:
+            return
+        window = RegistrationWindow.objects.filter(semester=semester).first()
+        if not window:
+            window = RegistrationWindow.objects.filter(is_active=True).first()
+        if window and not window.is_open:
+            if window.status_label == "closed":
+                raise RegistrationError(
+                    "registration_closed",
+                    f"Registration for {semester} closed on {window.closes_at.strftime('%b %d, %Y at %H:%M')}. "
+                    "Please contact the Registrar's office for late registration."
+                )
+            elif window.status_label == "upcoming":
+                raise RegistrationError(
+                    "registration_not_open",
+                    f"Registration for {semester} opens on {window.opens_at.strftime('%b %d, %Y at %H:%M')}."
+                )
+            elif not window.is_active:
+                raise RegistrationError(
+                    "registration_inactive",
+                    f"Registration for {semester} is currently suspended."
+                )
 
     def _check_course_active(self, course: Course):
         if course.status != Course.Status.ACTIVE:
@@ -166,12 +192,22 @@ class RegistrationService:
         ).count()
         is_full = active_count >= course.max_students
         status = Enrollment.Status.WAITLISTED if is_full else Enrollment.Status.ACTIVE
-        enrollment = Enrollment.objects.create(
-            student=self.student,
-            course=course,
-            status=status,
-            enrolled_at=timezone.now(),
-        )
+
+        # Check if an existing (e.g. dropped) enrollment record exists for this student and course
+        existing = Enrollment.objects.filter(student=self.student, course=course).first()
+        if existing:
+            existing.status = status
+            existing.enrolled_at = timezone.now()
+            existing.dropped_at = None
+            existing.save(update_fields=["status", "enrolled_at", "dropped_at"])
+            enrollment = existing
+        else:
+            enrollment = Enrollment.objects.create(
+                student=self.student,
+                course=course,
+                status=status,
+                enrolled_at=timezone.now(),
+            )
         self._active_enrollments = None
         logger.info(
             "Registration: student=%s course=%s status=%s semester=%s",

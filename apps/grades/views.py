@@ -28,26 +28,36 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
-from .models import Grade, GradeBatch, Assignment, SemesterRecord, Transcript
+from .models import Grade, GradeBatch, Assignment, SemesterRecord, Transcript, Submission
 from .serializers import (
     GradeSerializer, AssignmentSerializer, AssignmentCreateSerializer,
     GradeBatchListSerializer, GradeBatchDetailSerializer,
     BatchGradeEntrySerializer, SubmitBatchSerializer, RejectBatchSerializer,
     TranscriptRowSerializer, SemesterRecordSerializer,
+    SubmissionSerializer, SubmissionCreateSerializer,
 )
-from .gpa import compute_semester_gpa, compute_cumulative_gpa
+from .gpa import compute_semester_gpa, compute_cumulative_gpa, letter_from_pct
 from core.permissions import IsInstructor
 from core.pagination import StandardResultsPagination
 
 logger = logging.getLogger(__name__)
 
-CURRENT_SEMESTER       = "2025-SPRING"
-CURRENT_SEMESTER_LABEL = "Spring 2025"
+
+def get_current_semester_info():
+    """Retrieve the current active semester and label dynamically."""
+    try:
+        from apps.courses.models import RegistrationWindow
+        window = RegistrationWindow.objects.filter(is_active=True).order_by("-opens_at").first()
+        if window:
+            return window.semester, window.semester_label or window.semester
+    except Exception:
+        pass
+    return "2025-SPRING", "Spring 2025"
 
 
-# ── Assignment viewset (Lecturer) ──────────────────────────────────────────────
+# ── Assignment viewset (Lecturer + Student Submissions) ────────────────────────
 class AssignmentViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated, IsInstructor]
+    permission_classes = [IsAuthenticated]
     pagination_class   = StandardResultsPagination
 
     def get_serializer_class(self):
@@ -56,20 +66,80 @@ class AssignmentViewSet(viewsets.ModelViewSet):
         return AssignmentSerializer
 
     def get_queryset(self):
-        qs = Assignment.objects.select_related("course").filter(
-            course__instructors=self.request.user
-        )
+        user = self.request.user
+        if user.role == "instructor":
+            qs = Assignment.objects.select_related("course").filter(
+                course__instructors=user
+            )
+        elif user.role in ("staff", "admin"):
+            qs = Assignment.objects.select_related("course").all()
+        else:
+            # Students see published assignments for their enrolled courses
+            from apps.courses.models import Enrollment
+            enrolled_courses = Enrollment.objects.filter(
+                student=user, status=Enrollment.Status.ACTIVE
+            ).values_list("course_id", flat=True)
+            qs = Assignment.objects.select_related("course").filter(
+                course_id__in=enrolled_courses, is_published=True
+            )
+
         course_id = self.request.query_params.get("course")
         if course_id:
             qs = qs.filter(course_id=course_id)
         return qs.order_by("-created_at")
 
-    @action(detail=True, methods=["post"], url_path="publish")
+    @action(detail=True, methods=["post"], url_path="publish", permission_classes=[IsAuthenticated, IsInstructor])
     def publish(self, request, pk=None):
         assignment = self.get_object()
         assignment.is_published = not assignment.is_published
         assignment.save(update_fields=["is_published"])
         return Response({"is_published": assignment.is_published})
+
+    @action(detail=True, methods=["post"], url_path="submit", permission_classes=[IsAuthenticated])
+    def submit(self, request, pk=None):
+        """Student submits an assignment."""
+        try:
+            assignment = Assignment.objects.get(pk=pk)
+        except Assignment.DoesNotExist:
+            return Response({"error": "not_found", "detail": "Assignment not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        from apps.courses.models import Enrollment
+        if not Enrollment.objects.filter(student=request.user, course=assignment.course, status=Enrollment.Status.ACTIVE).exists() and request.user.role not in ("admin",):
+            return Response({"error": "not_enrolled", "detail": "You must be actively enrolled in this course to submit work."}, status=status.HTTP_403_FORBIDDEN)
+
+        is_late = False
+        if assignment.due_date and timezone.now() > assignment.due_date:
+            is_late = True
+
+        serializer = SubmissionCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        submission, _ = Submission.objects.update_or_create(
+            assignment=assignment,
+            student=request.user,
+            defaults={
+                "file": serializer.validated_data.get("file"),
+                "text_content": serializer.validated_data.get("text_content", ""),
+                "status": Submission.Status.LATE if is_late else Submission.Status.SUBMITTED,
+                "submitted_at": timezone.now(),
+            }
+        )
+        return Response(SubmissionSerializer(submission, context={"request": request}).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get"], url_path="my-submission", permission_classes=[IsAuthenticated])
+    def my_submission(self, request, pk=None):
+        """Student views their submission for an assignment."""
+        submission = Submission.objects.filter(assignment_id=pk, student=request.user).first()
+        if not submission:
+            return Response(None, status=status.HTTP_200_OK)
+        return Response(SubmissionSerializer(submission, context={"request": request}).data)
+
+    @action(detail=True, methods=["get"], url_path="submissions", permission_classes=[IsAuthenticated, IsInstructor])
+    def submissions(self, request, pk=None):
+        """Lecturer views all student submissions for an assignment."""
+        assignment = self.get_object()
+        submissions = Submission.objects.filter(assignment=assignment).select_related("student", "file").order_by("-submitted_at")
+        return Response(SubmissionSerializer(submissions, many=True, context={"request": request}).data)
 
 
 # ── GradeBatch viewset (Lecturer + Officer) ────────────────────────────────────
@@ -223,6 +293,111 @@ class GradeBatchViewSet(
         logger.info("Batch %s published by %s — students notified", pk, request.user.email)
         return Response(GradeBatchDetailSerializer(batch).data)
 
+    # ── LECTURER/OFFICER: export CSV roster template ─────────────────────────
+    @action(detail=True, methods=["get"], url_path="export-csv")
+    def export_csv(self, request, pk=None):
+        import csv
+        from django.http import HttpResponse
+        batch = self.get_object()
+        course = batch.assignment.course
+        from apps.courses.models import Enrollment
+
+        enrollments = (
+            Enrollment.objects
+            .filter(course=course, status=Enrollment.Status.ACTIVE)
+            .select_related("student")
+            .order_by("student__last_name", "student__first_name")
+        )
+        grades_by_student = {g.student_id: g for g in batch.assignment.grades.all()}
+
+        response = HttpResponse(content_type="text/csv")
+        safe_title = "".join(c for c in batch.assignment.title if c.isalnum() or c in (" ", "_", "-")).strip()
+        response["Content-Disposition"] = f'attachment; filename="grade_roster_{course.code}_{safe_title}.csv"'
+
+        writer = csv.writer(response)
+        writer.writerow(["student_id", "student_name", "email", "score", "feedback"])
+        for e in enrollments:
+            s = e.student
+            g = grades_by_student.get(s.id)
+            score_val = str(g.score) if g and g.score is not None else ""
+            feedback_val = g.feedback if g and g.feedback else ""
+            writer.writerow([s.student_id or str(s.id), s.full_name, s.email, score_val, feedback_val])
+
+        return response
+
+    # ── LECTURER: import CSV grade spreadsheet ──────────────────────────────
+    @action(detail=True, methods=["post"], url_path="import-csv")
+    def import_csv(self, request, pk=None):
+        import csv
+        import io
+        from decimal import Decimal
+        from django.contrib.auth import get_user_model
+        from django.db.models import Q
+        User = get_user_model()
+        batch = self.get_object()
+
+        if batch.status not in (GradeBatch.Status.DRAFT, GradeBatch.Status.REJECTED):
+            return Response(
+                {"error": "not_editable", "detail": "Batch cannot be edited in its current status."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        csv_file = request.FILES.get("file")
+        if not csv_file:
+            return Response({"error": "no_file", "detail": "Please provide a CSV file."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            decoded = csv_file.read().decode("utf-8-sig")
+            reader = csv.DictReader(io.StringIO(decoded))
+        except Exception as e:
+            return Response({"error": "invalid_csv", "detail": f"Failed to parse CSV file: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        processed = 0
+        errors = []
+        for row_num, row in enumerate(reader, start=2):
+            raw_id = (row.get("student_id") or row.get("email") or "").strip()
+            raw_score = (row.get("score") or "").strip()
+            raw_feedback = (row.get("feedback") or "").strip()
+
+            if not raw_id or not raw_score:
+                continue
+
+            try:
+                score_num = Decimal(raw_score)
+                if score_num < 0 or score_num > batch.assignment.max_score:
+                    errors.append(f"Row {row_num}: Score {raw_score} exceeds limits (0 - {batch.assignment.max_score})")
+                    continue
+            except Exception:
+                errors.append(f"Row {row_num}: Invalid score '{raw_score}'")
+                continue
+
+            student = User.objects.filter(Q(student_id=raw_id) | Q(email=raw_id) | Q(id__iexact=raw_id)).first()
+            if not student:
+                errors.append(f"Row {row_num}: Student '{raw_id}' not found")
+                continue
+
+            pct = float((score_num / batch.assignment.max_score) * 100) if batch.assignment.max_score else 0.0
+            letter = letter_from_pct(pct)
+
+            Grade.objects.update_or_create(
+                assignment=batch.assignment,
+                student=student,
+                defaults={
+                    "score": score_num,
+                    "feedback": raw_feedback,
+                    "graded_by": request.user,
+                    "graded_at": timezone.now(),
+                }
+            )
+            processed += 1
+
+        return Response({
+            "imported_count": processed,
+            "errors": errors,
+            "detail": f"Imported {processed} grades with {len(errors)} errors.",
+            "total": Grade.objects.filter(assignment=batch.assignment).count(),
+        })
+
 
 # ── Grade viewset (Student) ────────────────────────────────────────────────────
 class GradeViewSet(viewsets.ReadOnlyModelViewSet):
@@ -252,18 +427,19 @@ class GradeViewSet(viewsets.ReadOnlyModelViewSet):
         if cached:
             return Response(cached)
 
+        curr_sem, curr_label = get_current_semester_info()
         records       = SemesterRecord.objects.filter(student=request.user).order_by("semester")
-        current_rec   = records.filter(semester=CURRENT_SEMESTER).first()
+        current_rec   = records.filter(semester=curr_sem).first()
         all_recs      = list(records)
 
-        sem_gpa = current_rec.semester_gpa  if current_rec else compute_semester_gpa(request.user, CURRENT_SEMESTER)
+        sem_gpa = current_rec.semester_gpa  if current_rec else compute_semester_gpa(request.user, curr_sem)
         cum_gpa = current_rec.cumulative_gpa if current_rec else compute_cumulative_gpa(request.user)
 
         data = {
             "semester_gpa":           sem_gpa,
             "cumulative_gpa":         cum_gpa,
-            "current_semester":       CURRENT_SEMESTER,
-            "current_semester_label": CURRENT_SEMESTER_LABEL,
+            "current_semester":       curr_sem,
+            "current_semester_label": curr_label,
             "credits_completed":      current_rec.cumulative_credits_earned  if current_rec else 0,
             "credits_this_semester":  current_rec.semester_credits_attempted if current_rec else 0,
             "semester_history":       SemesterRecordSerializer(all_recs, many=True).data,
@@ -299,13 +475,55 @@ class GradeViewSet(viewsets.ReadOnlyModelViewSet):
         cache.set(cache_key, result, 60 * 30)
         return Response(result)
 
+    @action(detail=False, methods=["get"], url_path="transcript/pdf")
+    def transcript_pdf(self, request):
+        """Generates downloadable unofficial transcript PDF with watermark."""
+        from django.http import HttpResponse
+        from .pdf import build_transcript_pdf
+
+        rows = Transcript.objects.filter(student=request.user).select_related("course").order_by("-semester", "course__code")
+        records = {r.semester: r for r in SemesterRecord.objects.filter(student=request.user)}
+        semesters: dict = {}
+        for row in rows:
+            key = row.semester
+            if key not in semesters:
+                semesters[key] = {"semester": key, "label": row.semester_label, "courses": []}
+            semesters[key]["courses"].append(TranscriptRowSerializer(row).data)
+
+        semesters_list = []
+        for key, sem in semesters.items():
+            rec = records.get(key)
+            sem["semester_gpa"]      = str(rec.semester_gpa)     if rec and rec.semester_gpa     else "—"
+            sem["cumulative_gpa"]    = str(rec.cumulative_gpa)   if rec and rec.cumulative_gpa   else "—"
+            sem["credits_attempted"] = rec.semester_credits_attempted if rec else 0
+            sem["credits_earned"]    = rec.semester_credits_earned    if rec else 0
+            semesters_list.append(sem)
+
+        curr_sem, _ = get_current_semester_info()
+        current_rec = records.get(curr_sem) or SemesterRecord.objects.filter(student=request.user).order_by("-semester").first()
+        cum_gpa = current_rec.cumulative_gpa if current_rec and current_rec.cumulative_gpa else compute_cumulative_gpa(request.user)
+
+        cumulative_stats = {
+            "cumulative_gpa": str(cum_gpa) if cum_gpa else "—",
+            "cumulative_credits_attempted": current_rec.cumulative_credits_attempted if current_rec else sum(s.get("credits_attempted", 0) for s in semesters_list),
+            "cumulative_credits_earned": current_rec.cumulative_credits_earned if current_rec else sum(s.get("credits_earned", 0) for s in semesters_list),
+            "cumulative_quality_points": str(current_rec.cumulative_quality_points) if current_rec and current_rec.cumulative_quality_points else "—",
+        }
+
+        pdf_buffer = build_transcript_pdf(request.user, semesters_list, cumulative_stats)
+        student_id_str = request.user.student_id or str(request.user.id)[:8]
+        response = HttpResponse(pdf_buffer.getvalue(), content_type="application/pdf")
+        response["Content-Disposition"] = f'inline; filename="unofficial_transcript_{student_id_str}.pdf"'
+        return response
+
     @action(detail=False, methods=["get"], url_path="course-summary")
     def course_summary(self, request):
         from apps.courses.models import Enrollment
         from .gpa import compute_course_final_grade
+        curr_sem, _ = get_current_semester_info()
         enrollments = (
             Enrollment.objects
-            .filter(student=request.user, status="active", course__semester=CURRENT_SEMESTER)
+            .filter(student=request.user, status="active", course__semester=curr_sem)
             .select_related("course")
         )
         result = []
@@ -326,8 +544,9 @@ class GradeViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=["post"], url_path="recompute")
     def recompute(self, request):
         from .tasks import recompute_gpa_for_student
-        semester = request.data.get("semester", CURRENT_SEMESTER)
-        label    = request.data.get("semester_label", CURRENT_SEMESTER_LABEL)
+        curr_sem, curr_label = get_current_semester_info()
+        semester = request.data.get("semester", curr_sem)
+        label    = request.data.get("semester_label", curr_label)
         recompute_gpa_for_student.delay(str(request.user.id), semester, label)
         cache.delete(f"gpa_summary:{request.user.id}")
         cache.delete(f"transcript:{request.user.id}")

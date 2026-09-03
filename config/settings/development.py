@@ -20,8 +20,14 @@ CACHES = {
 CORS_ALLOW_ALL_ORIGINS = True
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
-DEFAULT_FILE_STORAGE  = "django.core.files.storage.FileSystemStorage"
-STATICFILES_STORAGE   = "django.contrib.staticfiles.storage.StaticFilesStorage"
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+    },
+}
 
 # Synchronous task execution in dev (no Celery needed)
 CELERY_TASK_ALWAYS_EAGER = True

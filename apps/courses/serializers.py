@@ -80,32 +80,60 @@ class CourseListSerializer(serializers.ModelSerializer):
 
 
 class CourseDetailSerializer(CourseListSerializer):
-    """Full detail — includes lessons, instructors, prerequisites."""
+    """Full detail — includes lessons, instructors, prerequisites, and schedules."""
     lessons = LessonSerializer(many=True, read_only=True)
     instructor_ids = serializers.ListField(child=serializers.UUIDField(), write_only=True, required=False)
     category_id = serializers.UUIDField(write_only=True, required=False)
+    schedules_data = serializers.ListField(child=serializers.DictField(), write_only=True, required=False)
 
     class Meta(CourseListSerializer.Meta):
-        fields = CourseListSerializer.Meta.fields + ["lessons", "syllabus_url", "instructor_ids", "category_id"]
+        fields = CourseListSerializer.Meta.fields + [
+            "lessons", "syllabus_url", "instructor_ids", "category_id", "schedules_data"
+        ]
 
     def create(self, validated_data):
         instructor_ids = validated_data.pop("instructor_ids", [])
         category_id = validated_data.pop("category_id", None)
+        schedules_data = validated_data.pop("schedules_data", [])
         if category_id:
             validated_data["category_id"] = category_id
         course = super().create(validated_data)
         if instructor_ids:
             course.instructors.set(instructor_ids)
+        if schedules_data:
+            for s in schedules_data:
+                CourseSchedule.objects.create(
+                    course=course,
+                    day_of_week=s.get("day_of_week", "mon"),
+                    start_time=s.get("start_time", "09:00"),
+                    end_time=s.get("end_time", "10:30"),
+                    room=s.get("room", ""),
+                    is_online=s.get("is_online", False),
+                    meeting_link=s.get("meeting_link", ""),
+                )
         return course
 
     def update(self, instance, validated_data):
         instructor_ids = validated_data.pop("instructor_ids", None)
         category_id = validated_data.pop("category_id", None)
+        schedules_data = validated_data.pop("schedules_data", None)
         if category_id:
             validated_data["category_id"] = category_id
         course = super().update(instance, validated_data)
         if instructor_ids is not None:
             course.instructors.set(instructor_ids)
+        if schedules_data is not None:
+            instance.schedules.all().delete()
+            for s in schedules_data:
+                CourseSchedule.objects.create(
+                    course=instance,
+                    day_of_week=s.get("day_of_week", "mon"),
+                    start_time=s.get("start_time", "09:00"),
+                    end_time=s.get("end_time", "10:30"),
+                    room=s.get("room", ""),
+                    is_online=s.get("is_online", False),
+                    meeting_link=s.get("meeting_link", ""),
+                )
         return course
 
 
@@ -171,10 +199,11 @@ class BulkRegistrationSerializer(serializers.Serializer):
 
 class RegistrationWindowSerializer(serializers.ModelSerializer):
     is_open = serializers.BooleanField(read_only=True)
+    status_label = serializers.CharField(read_only=True)
 
     class Meta:
         model = RegistrationWindow
-        fields = ["id", "semester", "opens_at", "closes_at", "is_active", "is_open"]
+        fields = ["id", "semester", "opens_at", "closes_at", "is_active", "is_open", "status_label"]
 
 
 class DropEnrollmentSerializer(serializers.Serializer):

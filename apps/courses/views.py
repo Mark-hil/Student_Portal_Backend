@@ -5,6 +5,7 @@ Covers: catalog, my-courses, registration, bulk-register, drop, schedule conflic
 import logging
 from django.db.models import Count, Q, Prefetch
 from django.core.cache import cache
+from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.cache import cache_page
 from rest_framework import viewsets, status, mixins
@@ -190,8 +191,185 @@ class CourseViewSet(viewsets.ModelViewSet):
             qs = qs.filter(semester=semester)
         window = qs.order_by("-opens_at").first()
         if not window:
-            return Response({"is_open": False, "detail": "No active registration window found."})
+            return Response({"is_open": False, "status_label": "closed", "detail": "No active registration window found."})
         return Response(RegistrationWindowSerializer(window).data)
+
+    # ── Manage Registration Window (Admin/Staff) ───────────────────────────
+    @action(detail=False, methods=["post", "patch"], url_path="registration-window/manage", permission_classes=[IsAuthenticated])
+    def manage_registration_window(self, request):
+        if request.user.role not in ("admin", "staff") and not request.user.is_staff:
+            return Response({"detail": "Only academic staff and administrators can manage registration windows."}, status=status.HTTP_403_FORBIDDEN)
+        
+        semester = request.data.get("semester") or "Spring 2025"
+        extend_days = request.data.get("extend_days")
+        reopen_flag = request.data.get("reopen")
+        opens_at_str = request.data.get("opens_at")
+        closes_at_str = request.data.get("closes_at")
+        is_active = request.data.get("is_active")
+
+        window = RegistrationWindow.objects.filter(semester=semester).first()
+        if not window:
+            now = timezone.now()
+            from datetime import timedelta
+            window = RegistrationWindow.objects.create(
+                semester=semester,
+                opens_at=now,
+                closes_at=now + timedelta(days=14),
+                is_active=True
+            )
+
+        if extend_days:
+            try:
+                window.extend(int(extend_days))
+            except Exception as e:
+                return Response({"detail": f"Failed to extend window: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+        elif reopen_flag:
+            window.reopen()
+        
+        if opens_at_str:
+            window.opens_at = opens_at_str
+        if closes_at_str:
+            window.closes_at = closes_at_str
+        if is_active is not None:
+            window.is_active = bool(is_active)
+        
+        window.save()
+        return Response(RegistrationWindowSerializer(window).data)
+
+    # ── Registration Reports & CSV Exports ────────────────────────────────
+    @action(detail=False, methods=["get"], url_path="reports/registration-stats", permission_classes=[IsAuthenticated])
+    def registration_stats(self, request):
+        if request.user.role not in ("admin", "staff") and not request.user.is_staff:
+            return Response({"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        semester = request.query_params.get("semester", "Spring 2025")
+        students = User.objects.filter(role=User.Role.STUDENT, is_active=True)
+        total_students = students.count()
+
+        active_enrollments = Enrollment.objects.filter(
+            status__in=[Enrollment.Status.ACTIVE, Enrollment.Status.WAITLISTED]
+        )
+        if semester:
+            active_enrollments = active_enrollments.filter(course__semester=semester)
+
+        registered_student_ids = set(active_enrollments.values_list("student_id", flat=True))
+        registered_count = len(registered_student_ids)
+        unregistered_count = max(0, total_students - registered_count)
+        rate_pct = round((registered_count / total_students * 100), 1) if total_students > 0 else 0
+
+        total_credits = sum(e.course.credits for e in active_enrollments.select_related("course"))
+        avg_credits = round(total_credits / registered_count, 1) if registered_count > 0 else 0
+
+        return Response({
+            "semester": semester,
+            "total_students": total_students,
+            "registered_students": registered_count,
+            "unregistered_students": unregistered_count,
+            "registration_rate_pct": rate_pct,
+            "total_active_enrollments": active_enrollments.count(),
+            "avg_credits_per_registered": avg_credits,
+        })
+
+    @action(detail=False, methods=["get"], url_path="reports/registered-csv", permission_classes=[IsAuthenticated])
+    def registered_csv(self, request):
+        if request.user.role not in ("admin", "staff") and not request.user.is_staff:
+            return Response({"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        import csv
+        from django.http import HttpResponse
+        from django.contrib.auth import get_user_model
+        from collections import defaultdict
+
+        User = get_user_model()
+        semester = request.query_params.get("semester", "")
+
+        enrollments = (
+            Enrollment.objects
+            .filter(status__in=[Enrollment.Status.ACTIVE, Enrollment.Status.WAITLISTED])
+            .select_related("student", "course")
+        )
+        if semester:
+            enrollments = enrollments.filter(course__semester=semester)
+
+        student_enrollments = defaultdict(list)
+        for e in enrollments:
+            student_enrollments[e.student].append(e)
+
+        response = HttpResponse(content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = f'attachment; filename="registered_students_{semester or "all"}.csv"'
+        response.write("\ufeff")
+
+        writer = csv.writer(response)
+        writer.writerow([
+            "Student ID", "First Name", "Last Name", "Email", "Department/Major",
+            "Total Enrolled Courses", "Course Codes", "Total Registered Credits", "Registration Status"
+        ])
+
+        for student, enr_list in student_enrollments.items():
+            courses_str = ", ".join(e.course.code for e in enr_list)
+            total_credits = sum(e.course.credits for e in enr_list)
+            writer.writerow([
+                student.student_id or f"STU-{str(student.id)[:6].upper()}",
+                student.first_name,
+                student.last_name,
+                student.email,
+                student.department or getattr(getattr(student, 'profile', None), 'major', 'Undeclared'),
+                len(enr_list),
+                courses_str,
+                total_credits,
+                "Registered (Full-time)" if total_credits >= 12 else "Registered (Part-time)"
+            ])
+
+        return response
+
+    @action(detail=False, methods=["get"], url_path="reports/unregistered-csv", permission_classes=[IsAuthenticated])
+    def unregistered_csv(self, request):
+        if request.user.role not in ("admin", "staff") and not request.user.is_staff:
+            return Response({"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        import csv
+        from django.http import HttpResponse
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        semester = request.query_params.get("semester", "")
+
+        active_enrollments = Enrollment.objects.filter(
+            status__in=[Enrollment.Status.ACTIVE, Enrollment.Status.WAITLISTED]
+        )
+        if semester:
+            active_enrollments = active_enrollments.filter(course__semester=semester)
+
+        registered_student_ids = set(active_enrollments.values_list("student_id", flat=True))
+        unregistered_students = User.objects.filter(
+            role=User.Role.STUDENT, is_active=True
+        ).exclude(id__in=registered_student_ids).order_by("last_name", "first_name")
+
+        response = HttpResponse(content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = f'attachment; filename="unregistered_students_{semester or "all"}.csv"'
+        response.write("\ufeff")
+
+        writer = csv.writer(response)
+        writer.writerow([
+            "Student ID", "First Name", "Last Name", "Email", "Phone",
+            "Department/Major", "Registration Status", "Action Required"
+        ])
+
+        for student in unregistered_students:
+            writer.writerow([
+                student.student_id or f"STU-{str(student.id)[:6].upper()}",
+                student.first_name,
+                student.last_name,
+                student.email,
+                student.phone or "N/A",
+                student.department or getattr(getattr(student, 'profile', None), 'major', 'Undeclared'),
+                "Not Registered (0 Credits)",
+                "Contact student / Academic Advisor follow-up"
+            ])
+
+        return response
 
     # ── Conflict check (before registering) ───────────────────────────────
     @action(detail=True, methods=["get"], url_path="check-conflict")

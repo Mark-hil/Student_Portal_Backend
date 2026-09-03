@@ -1,6 +1,34 @@
 """Grade serializers — full workflow: lecturer upload, officer review, student view."""
 from rest_framework import serializers
-from .models import Grade, GradeBatch, Assignment, SemesterRecord, Transcript
+from .models import Grade, GradeBatch, Assignment, SemesterRecord, Transcript, Submission
+
+
+class SubmissionSerializer(serializers.ModelSerializer):
+    student_name = serializers.CharField(source="student.full_name", read_only=True)
+    student_email = serializers.CharField(source="student.email", read_only=True)
+    student_code = serializers.CharField(source="student.student_id", read_only=True)
+    file_url = serializers.SerializerMethodField()
+    file_name = serializers.CharField(source="file.original_name", read_only=True)
+
+    class Meta:
+        model = Submission
+        fields = [
+            "id", "assignment_id", "student_id", "student_code", "student_name", "student_email",
+            "file", "file_name", "file_url", "text_content", "status",
+            "submitted_at", "updated_at",
+        ]
+
+    def get_file_url(self, obj):
+        request = self.context.get("request")
+        if obj.file and obj.file.file and hasattr(obj.file.file, "url"):
+            return request.build_absolute_uri(obj.file.file.url) if request else obj.file.file.url
+        return None
+
+
+class SubmissionCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Submission
+        fields = ["file", "text_content"]
 
 
 class AssignmentSerializer(serializers.ModelSerializer):
@@ -133,7 +161,7 @@ class TranscriptRowSerializer(serializers.ModelSerializer):
         fields = [
             "id", "course_code", "course_title", "credits",
             "semester", "semester_label",
-            "final_grade", "grade_points",
+            "score_percentage", "final_grade", "grade_points",
             "credits_attempted", "credits_earned", "quality_points",
         ]
 

@@ -3,11 +3,12 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 
 class NotificationConsumer(AsyncWebsocketConsumer):
     async def connect(self):
-        if self.scope["user"].is_anonymous:
-            await self.close()
+        user = self.scope.get("user")
+        if not user or user.is_anonymous:
+            await self.close(code=4001)
             return
 
-        self.user_group_name = f"user_{self.scope['user'].id}"
+        self.user_group_name = f"user_{user.id}"
 
         # Join user group
         await self.channel_layer.group_add(

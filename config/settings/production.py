@@ -45,9 +45,14 @@ SECURE_PROXY_SSL_HEADER         = ("HTTP_X_FORWARDED_PROTO", "https")
 CORS_ALLOWED_ORIGINS = os.environ.get("CORS_ORIGINS", "").split(",")
 CORS_ALLOW_CREDENTIALS = True
 
-# S3 Storage
-DEFAULT_FILE_STORAGE    = "storages.backends.s3boto3.S3Boto3Storage"
-STATICFILES_STORAGE     = "storages.backends.s3boto3.S3StaticStorage"
+STORAGES = {
+    "default": {
+        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+    },
+    "staticfiles": {
+        "BACKEND": "storages.backends.s3boto3.S3StaticStorage",
+    },
+}
 AWS_ACCESS_KEY_ID       = os.environ.get("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY   = os.environ.get("AWS_SECRET_ACCESS_KEY")
 AWS_STORAGE_BUCKET_NAME = os.environ.get("AWS_STORAGE_BUCKET_NAME")

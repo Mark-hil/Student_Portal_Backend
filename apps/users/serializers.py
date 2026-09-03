@@ -26,6 +26,23 @@ class UserSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "email", "role", "email_verified", "created_at", "student_id"]
 
+    def update(self, instance, validated_data):
+        profile_data = self.initial_data.get("profile")
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        if profile_data and isinstance(profile_data, dict):
+            profile, _ = UserProfile.objects.get_or_create(user=instance)
+            if "major" in profile_data:
+                profile.major = profile_data["major"]
+            if "preferences" in profile_data and isinstance(profile_data["preferences"], dict):
+                profile.preferences = {**profile.preferences, **profile_data["preferences"]}
+            profile.save()
+            instance.profile = profile
+
+        return instance
+
 
 class RegisterSerializer(serializers.Serializer):
     email      = serializers.EmailField()

@@ -73,6 +73,31 @@ class Assignment(models.Model):
         return f"{self.course.code} — {self.title}"
 
 
+class Submission(models.Model):
+    """Student deliverable submission for an assignment."""
+    class Status(models.TextChoices):
+        SUBMITTED = "submitted", "Submitted"
+        LATE      = "late",      "Submitted Late"
+        GRADED    = "graded",    "Graded"
+
+    id           = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    assignment   = models.ForeignKey(Assignment, on_delete=models.CASCADE, related_name="submissions")
+    student      = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="submissions")
+    file         = models.ForeignKey("files.UploadedFile", on_delete=models.SET_NULL, null=True, blank=True, related_name="submissions")
+    text_content = models.TextField(blank=True)
+    status       = models.CharField(max_length=20, choices=Status.choices, default=Status.SUBMITTED)
+    submitted_at = models.DateTimeField(default=timezone.now)
+    updated_at   = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table        = "submissions"
+        unique_together = [("assignment", "student")]
+        indexes         = [models.Index(fields=["assignment", "student"])]
+
+    def __str__(self):
+        return f"{self.student.email} → {self.assignment.title}"
+
+
 class GradeBatch(models.Model):
     """
     One batch per assignment.
@@ -334,6 +359,7 @@ class Transcript(models.Model):
     course             = models.ForeignKey("courses.Course", on_delete=models.CASCADE, related_name="transcripts")
     semester           = models.CharField(max_length=20, db_index=True)
     semester_label     = models.CharField(max_length=30)
+    score_percentage   = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     final_grade        = models.CharField(max_length=5, blank=True)
     grade_points       = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
     credits_attempted  = models.PositiveSmallIntegerField(default=0)

@@ -141,6 +141,51 @@ class AssignmentViewSet(viewsets.ModelViewSet):
         submissions = Submission.objects.filter(assignment=assignment).select_related("student", "file").order_by("-submitted_at")
         return Response(SubmissionSerializer(submissions, many=True, context={"request": request}).data)
 
+    @action(detail=True, methods=["post"], url_path="grade-submission", permission_classes=[IsAuthenticated, IsInstructor])
+    def grade_submission(self, request, pk=None):
+        """Lecturer grades an individual student submission and updates Grade record."""
+        assignment = self.get_object()
+        submission_id = request.data.get("submission_id")
+        score = request.data.get("score")
+        feedback = request.data.get("feedback", "")
+
+        if not submission_id or score is None:
+            return Response({"error": "missing_fields", "detail": "submission_id and score are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            score = float(score)
+        except (ValueError, TypeError):
+            return Response({"error": "invalid_score", "detail": "Score must be a number."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if score < 0 or score > float(assignment.max_score):
+            return Response({"error": "score_out_of_bounds", "detail": f"Score must be between 0 and {assignment.max_score}."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            submission = Submission.objects.get(pk=submission_id, assignment=assignment)
+        except Submission.DoesNotExist:
+            return Response({"error": "not_found", "detail": "Submission not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        submission.score = score
+        submission.feedback = feedback
+        submission.status = Submission.Status.GRADED
+        submission.graded_at = timezone.now()
+        submission.save(update_fields=["score", "feedback", "status", "graded_at"])
+
+        # Sync/upsert Grade record
+        from .models import Grade
+        Grade.objects.update_or_create(
+            student=submission.student,
+            assignment=assignment,
+            defaults={
+                "score": score,
+                "feedback": feedback,
+                "graded_by": request.user,
+                "graded_at": timezone.now(),
+            }
+        )
+
+        return Response(SubmissionSerializer(submission, context={"request": request}).data, status=status.HTTP_200_OK)
+
 
 # ── GradeBatch viewset (Lecturer + Officer) ────────────────────────────────────
 class GradeBatchViewSet(

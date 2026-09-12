@@ -1,11 +1,10 @@
-"""
-Base settings — shared across all environments.
-"""
 import os
 from datetime import timedelta
 from pathlib import Path
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+load_dotenv(BASE_DIR / ".env")
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-secret-key-change-in-production-min-50-chars!!")
 DEBUG = False
 ALLOWED_HOSTS = []
@@ -34,6 +33,7 @@ INSTALLED_APPS = [
     "apps.grades",
     "apps.notifications",
     "apps.files",
+    "apps.financials",
 ]
 
 MIDDLEWARE = [
@@ -164,6 +164,14 @@ STATIC_URL   = "/static/"
 STATIC_ROOT  = BASE_DIR / "staticfiles"
 MEDIA_URL    = "/media/"
 MEDIA_ROOT   = BASE_DIR / "media"
+
+# ── Cloudinary (Profile Pictures) ─────────────────────────────────────────────
+CLOUDINARY_STORAGE = {
+    "CLOUD_NAME": os.environ.get("CLOUDINARY_CLOUD_NAME", ""),
+    "API_KEY": os.environ.get("CLOUDINARY_API_KEY", ""),
+    "API_SECRET": os.environ.get("CLOUDINARY_API_SECRET", ""),
+}
+CLOUDINARY_PROFILE_FOLDER = "uniportal-profile picture"
 
 # ── Email ────────────────────────────────────────────────────────────────────
 EMAIL_BACKEND       = "django.core.mail.backends.smtp.EmailBackend"

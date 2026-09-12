@@ -84,12 +84,26 @@ class RegistrationService:
     def _validate(self, course: Course):
         self._check_registration_window(course)
         self._check_course_active(course)
+        self._check_financial_hold()
         self._check_already_enrolled(course)
         self._check_prerequisites(course)
         self._check_credit_limit(course)
         self._check_schedule_conflict(course)
         # Capacity check is last — least expensive rejection first
         self._check_capacity(course)
+
+    def _check_financial_hold(self):
+        try:
+            from apps.financials.models import FinancialHold
+            hold = FinancialHold.objects.filter(student=self.student, is_active=True).first()
+            if hold:
+                raise RegistrationError(
+                    "financial_hold",
+                    f"Course registration is restricted due to outstanding semester fee arrears of GH₵ {hold.amount_due:,.2f}. "
+                    "Please settle your balance via Mobile Money or Bank Deposit to clear your registration hold."
+                )
+        except Exception:
+            pass
 
     def _check_registration_window(self, course: Course):
         semester = course.semester or self.semester

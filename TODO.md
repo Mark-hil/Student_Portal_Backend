@@ -12,5 +12,5 @@
 - [ ] Ensure the GitHub Actions CI pipeline (`.github/workflows/ci.yml`) passes successfully.
 
 ## 3. Export Features
-- [ ] Implement PDF generation for Official Transcripts.
+- [x] Implement PDF generation for Official Transcripts.
 - [ ] Implement a CSV/Excel export for Lecturer Grade Batches.

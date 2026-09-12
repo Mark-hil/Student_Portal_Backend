@@ -16,15 +16,28 @@ class UserProfileSerializer(serializers.ModelSerializer):
 class UserSerializer(serializers.ModelSerializer):
     profile   = UserProfileSerializer(read_only=True)
     full_name = serializers.CharField(read_only=True)
+    avatar    = serializers.SerializerMethodField()
 
     class Meta:
         model  = User
         fields = [
             "id", "email", "student_id", "first_name", "last_name", "full_name",
-            "role", "avatar", "phone", "department", "bio",
+            "role", "avatar", "phone", "department", "bio", "is_active",
             "email_verified", "created_at", "profile",
         ]
         read_only_fields = ["id", "email", "role", "email_verified", "created_at", "student_id"]
+
+    def get_avatar(self, obj):
+        if not obj.avatar:
+            return None
+        url_str = str(obj.avatar)
+        if url_str.startswith("http://") or url_str.startswith("https://"):
+            return url_str
+        request = self.context.get("request")
+        try:
+            return request.build_absolute_uri(obj.avatar.url) if request else obj.avatar.url
+        except Exception:
+            return url_str
 
     def update(self, instance, validated_data):
         profile_data = self.initial_data.get("profile")
@@ -88,7 +101,7 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             "id", "email", "password", "first_name", "last_name", "role", 
-            "department", "phone"
+            "department", "phone", "is_active"
         ]
 
     def validate_password(self, value):

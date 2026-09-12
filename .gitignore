@@ -33,3 +33,4 @@ celerybeat-schedule.db.dir
 *.swo
 .DS_Store
 Thumbs.db
+.env

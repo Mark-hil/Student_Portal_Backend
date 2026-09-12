@@ -20,7 +20,7 @@ from .serializers import (
     CourseListSerializer, CourseDetailSerializer,
     EnrollmentSerializer, CategorySerializer,
     BulkRegistrationSerializer, RegistrationWindowSerializer,
-    DropEnrollmentSerializer,
+    DropEnrollmentSerializer, LessonSerializer,
 )
 from .registration import RegistrationService, RegistrationError
 from core.permissions import IsInstructor, IsAdminOrReadOnly, IsAdminOrStaff
@@ -395,6 +395,243 @@ class CourseViewSet(viewsets.ModelViewSet):
                         "existing_slot": f"{ms.start_time}–{ms.end_time}",
                     })
         return Response({"has_conflict": bool(conflicts), "conflicts": conflicts})
+
+    def perform_destroy(self, instance):
+        """Soft-archive if active enrollments exist, otherwise delete."""
+        if instance.enrollments.filter(status=Enrollment.Status.ACTIVE).exists():
+            instance.status = Course.Status.ARCHIVED
+            instance.save(update_fields=["status"])
+        else:
+            instance.delete()
+
+    @action(detail=True, methods=["get"], url_path="roster")
+    def roster(self, request, pk=None):
+        """Instructor/admin class roster with enrollment details and running grades."""
+        course = self.get_object()
+        user = request.user
+        if user.role == "instructor" and not course.instructors.filter(pk=user.pk).exists():
+            return Response({"error": "forbidden", "detail": "You do not instruct this course."}, status=status.HTTP_403_FORBIDDEN)
+        if user.role not in ("instructor", "staff", "admin") and not user.is_staff:
+            return Response({"error": "forbidden", "detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        from apps.grades.gpa import compute_course_final_grade
+        enrollments = (
+            course.enrollments
+            .select_related("student")
+            .order_by("student__last_name", "student__first_name")
+        )
+
+        students_data = []
+        for e in enrollments:
+            s = e.student
+            grade_info = compute_course_final_grade(s, course) if e.status == Enrollment.Status.ACTIVE else {"letter": "—", "percentage": 0.0}
+            students_data.append({
+                "enrollment_id": str(e.id),
+                "student_id": str(s.id),
+                "student_code": s.student_id or f"STU-{str(s.id)[:6].upper()}",
+                "name": s.full_name,
+                "email": s.email,
+                "department": s.department or getattr(getattr(s, "profile", None), "major", "Undeclared"),
+                "status": e.status,
+                "enrolled_at": e.enrolled_at,
+                "progress_pct": float(e.progress_pct),
+                "current_grade": grade_info.get("letter", "—"),
+                "current_pct": grade_info.get("percentage", 0.0),
+            })
+
+        return Response({
+            "course_id": str(course.id),
+            "course_code": course.code,
+            "course_title": course.title,
+            "total_enrolled": len(students_data),
+            "active_count": sum(1 for x in students_data if x["status"] == "active"),
+            "waitlisted_count": sum(1 for x in students_data if x["status"] == "waitlisted"),
+            "dropped_count": sum(1 for x in students_data if x["status"] == "dropped"),
+            "students": students_data,
+        })
+
+    @action(detail=True, methods=["get"], url_path="export-roster")
+    def export_roster(self, request, pk=None):
+        """Export class roster for instructor/staff in CSV format."""
+        import csv
+        from django.http import HttpResponse
+        from apps.grades.gpa import compute_course_final_grade
+
+        course = self.get_object()
+        user = request.user
+        if user.role == "instructor" and not course.instructors.filter(pk=user.pk).exists():
+            return Response({"error": "forbidden", "detail": "You do not instruct this course."}, status=status.HTTP_403_FORBIDDEN)
+        if user.role not in ("instructor", "staff", "admin") and not user.is_staff:
+            return Response({"error": "forbidden", "detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        timestamp_str = timezone.now().strftime("%Y%m%d_%H%M")
+        response = HttpResponse(content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = f'attachment; filename="{course.code}_student_roster_{timestamp_str}.csv"'
+        response.write("\ufeff")
+
+        writer = csv.writer(response)
+        writer.writerow([f"COURSE ENROLLMENT ROSTER: {course.code} - {course.title}"])
+        writer.writerow(["Semester", course.semester, "Credits", course.credits])
+        writer.writerow(["Exported At", timezone.now().strftime("%Y-%m-%d %H:%M:%S")])
+        writer.writerow([])
+        writer.writerow([
+            "Student ID / Index No",
+            "Student Full Name",
+            "Email Address",
+            "Department / Major",
+            "Enrollment Status",
+            "Enrolled Date",
+            "Progress (%)",
+            "Current Average (%)",
+            "Current Letter Grade",
+        ])
+
+        enrollments = (
+            course.enrollments
+            .select_related("student")
+            .order_by("student__last_name", "student__first_name")
+        )
+
+        for e in enrollments:
+            s = e.student
+            grade_info = compute_course_final_grade(s, course) if e.status == Enrollment.Status.ACTIVE else {}
+            if not grade_info:
+                grade_info = {"letter": "—", "percentage": None}
+            pct = grade_info.get("percentage")
+            pct_val = f"{float(pct):.1f}%" if pct is not None else "—"
+
+            writer.writerow([
+                s.student_id or f"STU-{str(s.id)[:6].upper()}",
+                s.full_name or s.email,
+                s.email,
+                s.department or getattr(getattr(s, "profile", None), "major", "Undeclared"),
+                e.get_status_display() if hasattr(e, "get_status_display") else str(e.status).capitalize(),
+                e.enrolled_at.strftime("%Y-%m-%d") if e.enrolled_at else "N/A",
+                f"{float(e.progress_pct):.1f}%",
+                pct_val,
+                grade_info.get("letter", "—") or "—",
+            ])
+
+        return response
+
+    @action(detail=True, methods=["get"], url_path="export-grades")
+    def export_grades(self, request, pk=None):
+        """Export comprehensive grade sheet across assignments for the course."""
+        import csv
+        from django.http import HttpResponse
+        from apps.grades.models import Submission
+        from apps.grades.gpa import compute_course_final_grade
+
+        course = self.get_object()
+        user = request.user
+        if user.role == "instructor" and not course.instructors.filter(pk=user.pk).exists():
+            return Response({"error": "forbidden", "detail": "You do not instruct this course."}, status=status.HTTP_403_FORBIDDEN)
+        if user.role not in ("instructor", "staff", "admin") and not user.is_staff:
+            return Response({"error": "forbidden", "detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        assignments = list(course.assignments.all().order_by("due_date", "created_at"))
+        timestamp_str = timezone.now().strftime("%Y%m%d_%H%M")
+        response = HttpResponse(content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = f'attachment; filename="{course.code}_grade_sheet_{timestamp_str}.csv"'
+        response.write("\ufeff")
+
+        writer = csv.writer(response)
+        writer.writerow([f"COURSE GRADE & ASSESSMENT REPORT: {course.code} - {course.title}"])
+        writer.writerow(["Semester", course.semester, "Total Assessments", len(assignments)])
+        writer.writerow(["Exported At", timezone.now().strftime("%Y-%m-%d %H:%M:%S")])
+        writer.writerow([])
+
+        # Header row with dynamic assignment columns
+        header = ["Student ID / Index No", "Student Full Name", "Email"]
+        for a in assignments:
+            header.append(f"{a.title} (Max {a.max_score} | Weight {a.weight}%)")
+        header.extend(["Final Course Average (%)", "Final Letter Grade"])
+        writer.writerow(header)
+
+        enrollments = (
+            course.enrollments
+            .filter(status=Enrollment.Status.ACTIVE)
+            .select_related("student")
+            .order_by("student__last_name", "student__first_name")
+        )
+
+        for e in enrollments:
+            s = e.student
+            row = [
+                s.student_id or f"STU-{str(s.id)[:6].upper()}",
+                s.full_name or s.email,
+                s.email,
+            ]
+            for a in assignments:
+                sub = Submission.objects.filter(assignment=a, student=s).order_by("-updated_at").first()
+                if sub and sub.score is not None:
+                    row.append(f"{sub.score:.1f}")
+                else:
+                    row.append("—")
+
+            grade_info = compute_course_final_grade(s, course) or {}
+            final_pct = grade_info.get("percentage")
+            row.append(f"{float(final_pct):.1f}%" if final_pct is not None else "—")
+            row.append(grade_info.get("letter", "—") or "—")
+            writer.writerow(row)
+
+        return response
+
+
+# ── Lesson ViewSet ────────────────────────────────────────────────────────────
+
+class LessonViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    serializer_class = LessonSerializer
+    pagination_class = None
+
+    def get_queryset(self):
+        user = self.request.user
+        course_id = self.request.query_params.get("course")
+        qs = Lesson.objects.all().select_related("course")
+        if course_id:
+            qs = qs.filter(course_id=course_id)
+        if user.role == "student":
+            enrolled = Enrollment.objects.filter(student=user, status=Enrollment.Status.ACTIVE).values_list("course_id", flat=True)
+            qs = qs.filter(course_id__in=enrolled)
+        elif user.role == "instructor":
+            qs = qs.filter(course__instructors=user)
+        return qs.order_by("order")
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        course = serializer.validated_data["course"]
+        if user.role == "instructor" and not course.instructors.filter(pk=user.pk).exists():
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You do not instruct this course.")
+        serializer.save(published_at=timezone.now())
+
+    @action(detail=True, methods=["post"], url_path="toggle-progress")
+    def toggle_progress(self, request, pk=None):
+        lesson = self.get_object()
+        user = request.user
+        from .models import LessonProgress
+        record, _ = LessonProgress.objects.get_or_create(student=user, lesson=lesson)
+        record.completed = not record.completed
+        record.completed_at = timezone.now() if record.completed else None
+        record.save(update_fields=["completed", "completed_at"])
+
+        # Update course enrollment progress percentage
+        enrollment = Enrollment.objects.filter(student=user, course=lesson.course, status=Enrollment.Status.ACTIVE).first()
+        if enrollment:
+            total_lessons = Lesson.objects.filter(course=lesson.course).count()
+            if total_lessons > 0:
+                completed_count = LessonProgress.objects.filter(
+                    student=user, lesson__course=lesson.course, completed=True
+                ).count()
+                enrollment.progress_pct = round((completed_count / total_lessons) * 100, 1)
+                enrollment.save(update_fields=["progress_pct"])
+
+        return Response({
+            "lesson_id": str(lesson.id),
+            "completed": record.completed,
+            "progress_pct": float(enrollment.progress_pct) if enrollment else 0.0,
+        })
 
 
 # ── Enrollment ────────────────────────────────────────────────────────────────

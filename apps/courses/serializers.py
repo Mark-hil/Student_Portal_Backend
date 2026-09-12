@@ -30,9 +30,22 @@ class InstructorSerializer(serializers.Serializer):
 
 
 class LessonSerializer(serializers.ModelSerializer):
+    is_completed = serializers.SerializerMethodField()
+
     class Meta:
         model = Lesson
-        fields = ["id", "title", "order", "lesson_type", "duration_minutes", "is_free_preview", "published_at"]
+        fields = [
+            "id", "course", "title", "order", "lesson_type", "content",
+            "video_url", "duration_minutes", "is_free_preview", "published_at",
+            "is_completed"
+        ]
+        read_only_fields = ["id"]
+
+    def get_is_completed(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return False
+        return obj.progress_records.filter(student=request.user, completed=True).exists()
 
 
 class PrerequisiteSerializer(serializers.ModelSerializer):

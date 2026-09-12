@@ -86,6 +86,9 @@ class Submission(models.Model):
     file         = models.ForeignKey("files.UploadedFile", on_delete=models.SET_NULL, null=True, blank=True, related_name="submissions")
     text_content = models.TextField(blank=True)
     status       = models.CharField(max_length=20, choices=Status.choices, default=Status.SUBMITTED)
+    score        = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    feedback     = models.TextField(blank=True)
+    graded_at    = models.DateTimeField(null=True, blank=True)
     submitted_at = models.DateTimeField(default=timezone.now)
     updated_at   = models.DateTimeField(auto_now=True)
 

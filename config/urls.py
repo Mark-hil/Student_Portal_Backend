@@ -28,6 +28,7 @@ urlpatterns = [
     path("api/v1/grades/",        include("apps.grades.urls")),
     path("api/v1/notifications/", include("apps.notifications.urls")),
     path("api/v1/files/",         include("apps.files.urls")),
+    path("api/v1/financials/",    include("apps.financials.urls")),
 ]
 
 if settings.DEBUG:

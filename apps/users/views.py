@@ -73,14 +73,81 @@ class ChangePasswordView(APIView):
         return Response({"detail": "Password updated successfully."})
 
 
+class AvatarUploadView(APIView):
+    """POST /api/v1/users/me/avatar/ — upload user profile picture to Cloudinary folder uniportal-profile picture."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        avatar_file = request.FILES.get("avatar") or request.FILES.get("file")
+        if not avatar_file:
+            return Response({"error": "no_file", "detail": "No image file provided."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if avatar_file.content_type not in ("image/jpeg", "image/png", "image/webp", "image/gif"):
+            return Response({"error": "invalid_type", "detail": "Only JPEG, PNG, WEBP, and GIF images are allowed."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if avatar_file.size > 5 * 1024 * 1024:
+            return Response({"error": "file_too_large", "detail": "Avatar image size must be under 5 MB."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+        cloudinary_url = None
+
+        try:
+            import os
+            import cloudinary
+            import cloudinary.uploader
+            from django.conf import settings
+
+            cloud_name = getattr(settings, "CLOUDINARY_STORAGE", {}).get("CLOUD_NAME") or os.environ.get("CLOUDINARY_CLOUD_NAME")
+            api_key = getattr(settings, "CLOUDINARY_STORAGE", {}).get("API_KEY") or os.environ.get("CLOUDINARY_API_KEY")
+            api_secret = getattr(settings, "CLOUDINARY_STORAGE", {}).get("API_SECRET") or os.environ.get("CLOUDINARY_API_SECRET")
+
+            if cloud_name:
+                if api_key and api_secret:
+                    cloudinary.config(
+                        cloud_name=cloud_name,
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        secure=True,
+                    )
+                upload_result = cloudinary.uploader.upload(
+                    avatar_file,
+                    folder=getattr(settings, "CLOUDINARY_PROFILE_FOLDER", "uniportal-profile picture"),
+                    public_id=f"user_{user.id}_avatar",
+                    overwrite=True,
+                    resource_type="image",
+                )
+                cloudinary_url = upload_result.get("secure_url") or upload_result.get("url")
+        except Exception as e:
+            logger.warning("Cloudinary upload failed or not configured, falling back to standard storage: %s", e)
+
+        if cloudinary_url:
+            user.avatar = cloudinary_url
+            user.save(update_fields=["avatar"])
+        else:
+            user.avatar = avatar_file
+            user.save(update_fields=["avatar"])
+
+        return Response(UserSerializer(user, context={"request": request}).data, status=status.HTTP_200_OK)
+
+
 class UserViewSet(viewsets.ModelViewSet):
     """Admin endpoint to manage users."""
     permission_classes = [IsAdminOrStaff]
+
     def get_queryset(self):
         qs = User.objects.all().order_by("-created_at")
         role = self.request.query_params.get("role")
         if role:
             qs = qs.filter(role=role)
+        search = self.request.query_params.get("search")
+        if search:
+            from django.db.models import Q
+            qs = qs.filter(
+                Q(first_name__icontains=search) |
+                Q(last_name__icontains=search) |
+                Q(email__icontains=search) |
+                Q(student_id__icontains=search)
+            )
         return qs
 
     def get_serializer_class(self):
@@ -88,6 +155,166 @@ class UserViewSet(viewsets.ModelViewSet):
             from .serializers import AdminCreateUserSerializer
             return AdminCreateUserSerializer
         return UserSerializer
+
+    @action(detail=True, methods=["post"], url_path="toggle-status")
+    def toggle_status(self, request, pk=None):
+        target_user = self.get_object()
+        target_user.is_active = not target_user.is_active
+        target_user.save(update_fields=["is_active"])
+        return Response({
+            "status": "success",
+            "is_active": target_user.is_active,
+            "user": UserSerializer(target_user, context={"request": request}).data,
+        })
+
+    @action(detail=True, methods=["post"], url_path="reset-password")
+    def reset_password(self, request, pk=None):
+        target_user = self.get_object()
+        new_password = request.data.get("new_password") or "TempPass123!"
+        target_user.set_password(new_password)
+        target_user.save(update_fields=["password"])
+        return Response({"status": "success", "detail": f"Password reset successfully for {target_user.email}."})
+
+    @action(detail=True, methods=["post"], url_path="avatar")
+    def upload_avatar(self, request, pk=None):
+        target_user = self.get_object()
+        avatar_file = request.FILES.get("avatar") or request.FILES.get("file")
+        if not avatar_file:
+            return Response({"error": "no_file", "detail": "No image file provided."}, status=status.HTTP_400_BAD_REQUEST)
+        if avatar_file.content_type not in ("image/jpeg", "image/png", "image/webp", "image/gif"):
+            return Response({"error": "invalid_type", "detail": "Only JPEG, PNG, WEBP, and GIF images are allowed."}, status=status.HTTP_400_BAD_REQUEST)
+        if avatar_file.size > 5 * 1024 * 1024:
+            return Response({"error": "file_too_large", "detail": "Avatar image size must be under 5 MB."}, status=status.HTTP_400_BAD_REQUEST)
+
+        cloudinary_url = None
+        try:
+            import os
+            import cloudinary
+            import cloudinary.uploader
+            from django.conf import settings
+
+            storage_cfg = getattr(settings, "CLOUDINARY_STORAGE", {})
+            cloud_name = storage_cfg.get("CLOUD_NAME") or os.environ.get("CLOUDINARY_CLOUD_NAME")
+            api_key = storage_cfg.get("API_KEY") or os.environ.get("CLOUDINARY_API_KEY")
+            api_secret = storage_cfg.get("API_SECRET") or os.environ.get("CLOUDINARY_API_SECRET")
+
+            if cloud_name:
+                if api_key and api_secret:
+                    cloudinary.config(cloud_name=cloud_name, api_key=api_key, api_secret=api_secret, secure=True)
+                upload_result = cloudinary.uploader.upload(
+                    avatar_file,
+                    folder=getattr(settings, "CLOUDINARY_PROFILE_FOLDER", "uniportal-profile picture"),
+                    public_id=f"user_{target_user.id}_avatar",
+                    overwrite=True,
+                    resource_type="image",
+                )
+                cloudinary_url = upload_result.get("secure_url") or upload_result.get("url")
+        except Exception as e:
+            logger.warning("Admin Cloudinary upload failed: %s", e)
+
+        if cloudinary_url:
+            target_user.avatar = cloudinary_url
+            target_user.save(update_fields=["avatar"])
+        else:
+            target_user.avatar = avatar_file
+            target_user.save(update_fields=["avatar"])
+
+        return Response(UserSerializer(target_user, context={"request": request}).data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["get"], url_path="export-students")
+    def export_students(self, request):
+        """Export student directory in CSV format for Academic Officers and Admins."""
+        import csv
+        from django.http import HttpResponse
+        from django.utils import timezone
+        from apps.grades.gpa import compute_cumulative_gpa
+
+        role = request.query_params.get("role", "student")
+        qs = User.objects.all().order_by("last_name", "first_name")
+        if role and role != "all":
+            qs = qs.filter(role=role)
+
+        search = request.query_params.get("search")
+        if search:
+            from django.db.models import Q
+            qs = qs.filter(
+                Q(first_name__icontains=search) |
+                Q(last_name__icontains=search) |
+                Q(email__icontains=search) |
+                Q(student_id__icontains=search)
+            )
+
+        timestamp_str = timezone.now().strftime("%Y%m%d_%H%M")
+        response = HttpResponse(content_type="text/csv; charset=utf-8")
+        filename_prefix = f"{role}_directory" if role and role != "all" else "user_directory"
+        if not role or role == "student":
+            filename_prefix = "student_directory"
+        response["Content-Disposition"] = f'attachment; filename="{filename_prefix}_{timestamp_str}.csv"'
+        response.write("\ufeff")
+
+        writer = csv.writer(response)
+        writer.writerow(["INSTITUTIONAL STUDENT DIRECTORY & DEMOGRAPHICS"])
+        writer.writerow(["Exported At", timezone.now().strftime("%Y-%m-%d %H:%M:%S")])
+        writer.writerow(["Filter Role", role or "All"])
+        writer.writerow([])
+        writer.writerow([
+            "Student ID / Index No",
+            "First Name",
+            "Last Name",
+            "Full Name",
+            "Email Address",
+            "Department / Major",
+            "Academic Level",
+            "Enrollment Year",
+            "Cumulative GPA",
+            "Credits Earned",
+            "Account Status",
+            "Registration Date",
+        ])
+
+        from apps.grades.models import Transcript
+
+        for u in qs:
+            gpa = 0.0
+            total_credits = 0
+            if u.role == "student":
+                latest_rec = u.semester_records.order_by("-computed_at").first()
+                if latest_rec and latest_rec.cumulative_gpa is not None:
+                    gpa = float(latest_rec.cumulative_gpa)
+                    total_credits = latest_rec.cumulative_credits_earned
+                else:
+                    gpa_val = compute_cumulative_gpa(u)
+                    if isinstance(gpa_val, dict):
+                        gpa = float(gpa_val.get("gpa", 0.0) or 0.0)
+                        total_credits = int(gpa_val.get("total_credits", 0) or 0)
+                    elif gpa_val is not None:
+                        gpa = float(gpa_val)
+
+                    if not total_credits:
+                        total_credits = sum(
+                            t.credits_earned for t in Transcript.objects.filter(student=u, grade_points__isnull=False)
+                        )
+
+            profile = getattr(u, "profile", None)
+            level = getattr(profile, "academic_level", "") if profile else ""
+            enroll_year = getattr(profile, "enrollment_year", "") if profile else ""
+
+            writer.writerow([
+                u.student_id or f"STU-{str(u.id)[:6].upper()}",
+                u.first_name,
+                u.last_name,
+                u.full_name or f"{u.first_name} {u.last_name}",
+                u.email,
+                u.department or getattr(profile, "major", "Undeclared"),
+                f"Level {level}" if level else "N/A",
+                enroll_year or "N/A",
+                f"{gpa:.2f}",
+                total_credits,
+                "Active" if u.is_active else "Suspended / Inactive",
+                u.created_at.strftime("%Y-%m-%d") if u.created_at else "",
+            ])
+
+        return response
 
 
 class SystemStatsView(APIView):

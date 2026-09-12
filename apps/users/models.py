@@ -35,6 +35,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         STUDENT = "student", "Student"
         INSTRUCTOR = "instructor", "Instructor"
         STAFF = "staff", "Staff"
+        FINANCE = "finance", "Finance Officer"
         ADMIN = "admin", "Admin"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -43,7 +44,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     first_name = models.CharField(max_length=150)
     last_name = models.CharField(max_length=150)
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.STUDENT, db_index=True)
-    avatar = models.ImageField(upload_to="avatars/%Y/%m/", null=True, blank=True)
+    avatar = models.ImageField(upload_to="avatars/%Y/%m/", null=True, blank=True, max_length=500)
     phone = models.CharField(max_length=20, blank=True)
     department = models.CharField(max_length=100, blank=True)
     bio = models.TextField(blank=True)
@@ -87,10 +88,29 @@ class User(AbstractBaseUser, PermissionsMixin):
     def is_instructor_role(self):
         return self.role == self.Role.INSTRUCTOR
 
+    @property
+    def is_finance_role(self):
+        return self.role in (self.Role.FINANCE, self.Role.ADMIN)
+
+    @property
+    def academic_level(self):
+        if hasattr(self, "profile") and self.profile and self.profile.academic_level:
+            return self.profile.academic_level
+        return "100"
+
 
 class UserProfile(models.Model):
     """Extended profile — separated to avoid SELECT * overhead."""
+    LEVEL_CHOICES = [
+        ("100", "Level 100 (Freshmen)"),
+        ("200", "Level 200 (Sophomores)"),
+        ("300", "Level 300 (Juniors)"),
+        ("400", "Level 400 (Seniors)"),
+        ("postgraduate", "Postgraduate"),
+    ]
+
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
+    academic_level = models.CharField(max_length=20, choices=LEVEL_CHOICES, default="100", blank=True)
     enrollment_year = models.PositiveSmallIntegerField(null=True, blank=True)
     graduation_year = models.PositiveSmallIntegerField(null=True, blank=True)
     major = models.CharField(max_length=100, blank=True)

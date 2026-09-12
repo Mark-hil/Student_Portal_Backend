@@ -15,6 +15,7 @@ class SubmissionSerializer(serializers.ModelSerializer):
         fields = [
             "id", "assignment_id", "student_id", "student_code", "student_name", "student_email",
             "file", "file_name", "file_url", "text_content", "status",
+            "score", "feedback", "graded_at",
             "submitted_at", "updated_at",
         ]
 
@@ -39,7 +40,7 @@ class AssignmentSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Assignment
         fields = [
-            "id", "title", "assignment_type", "max_score", "weight",
+            "id", "title", "assignment_type", "description", "max_score", "weight",
             "due_date", "is_published", "course_code", "course_title", "created_at",
             "batch_id"
         ]

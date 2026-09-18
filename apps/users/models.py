@@ -1,3 +1,4 @@
+
 """
 Custom User model.
 - UUID primary key (no sequential IDs leaked)
@@ -40,7 +41,13 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email = models.EmailField(unique=True, db_index=True)
-    student_id = models.CharField(max_length=20, unique=True, null=True, blank=True, db_index=True)
+    student_id = models.CharField(max_length=50, unique=True, null=True, blank=True, db_index=True)
+    moh_pin = models.CharField(max_length=60, unique=True, null=True, blank=True, db_index=True)
+    serial_number = models.CharField(max_length=60, null=True, blank=True, db_index=True)
+    program = models.CharField(max_length=30, choices=[("nursing", "Nursing"), ("midwifery", "Midwifery")], blank=True, default="")
+    class_name = models.CharField(max_length=50, blank=True, default="100")
+    admission_year = models.PositiveSmallIntegerField(null=True, blank=True)
+    is_registered = models.BooleanField(default=False)
     first_name = models.CharField(max_length=150)
     last_name = models.CharField(max_length=150)
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.STUDENT, db_index=True)
@@ -110,6 +117,7 @@ class UserProfile(models.Model):
     ]
 
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
+    # Academic & Program Details
     academic_level = models.CharField(max_length=20, choices=LEVEL_CHOICES, default="100", blank=True)
     enrollment_year = models.PositiveSmallIntegerField(null=True, blank=True)
     graduation_year = models.PositiveSmallIntegerField(null=True, blank=True)
@@ -118,8 +126,52 @@ class UserProfile(models.Model):
     total_credits = models.PositiveSmallIntegerField(default=0)
     preferences = models.JSONField(default=dict)
 
+    # Personal Details (info.txt)
+    ghana_card = models.CharField(max_length=50, blank=True, db_index=True)
+    gender = models.CharField(max_length=20, blank=True)
+    date_of_birth = models.DateField(null=True, blank=True)
+    birth_place = models.CharField(max_length=150, blank=True)
+    country_of_birth = models.CharField(max_length=100, blank=True, default="Ghana")
+    nationality = models.CharField(max_length=100, blank=True, default="Ghanaian")
+    languages_spoken = models.CharField(max_length=255, blank=True)
+    medical_condition = models.TextField(blank=True)
+
+    # Contact Information & Address (info.txt)
+    residential_address = models.CharField(max_length=255, blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    region = models.CharField(max_length=100, blank=True)
+    district = models.CharField(max_length=100, blank=True)
+    digital_address = models.CharField(max_length=50, blank=True)  # Ghana Post GPS
+
+    # Parent / Guardian / Next of Kin (info.txt)
+    guardian_name = models.CharField(max_length=150, blank=True)
+    guardian_phone = models.CharField(max_length=30, blank=True)
+    guardian_relationship = models.CharField(max_length=50, blank=True)
+
+    # Registration Audit
+    registration_completed_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         db_table = "user_profiles"
 
     def __str__(self):
         return f"Profile<{self.user.email}>"
+
+
+class IDSequence(models.Model):
+    """
+    Atomic sequence counter for institutional Student IDs.
+    Prevents race conditions using database row-level locking.
+    """
+    program = models.CharField(max_length=30, db_index=True)
+    class_name = models.CharField(max_length=50, blank=True, default="")
+    year = models.PositiveSmallIntegerField(db_index=True)
+    last_number = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "id_sequences"
+        unique_together = ("program", "class_name", "year")
+
+    def __str__(self):
+        return f"Seq<{self.program}-{self.class_name}-{self.year}: {self.last_number}>"

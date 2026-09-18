@@ -182,6 +182,14 @@ EMAIL_HOST_USER     = os.environ.get("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
 DEFAULT_FROM_EMAIL  = os.environ.get("DEFAULT_FROM_EMAIL", "noreply@university.edu")
 
+# ── Frontend URL ─────────────────────────────────────────────────────────────
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+
+# ── Arkesel SMS Gateway ───────────────────────────────────────────────────────
+ARKESEL_API_KEY = os.environ.get("ARKESEL_API_KEY", "")
+ARKESEL_SENDER_ID = os.environ.get("ARKESEL_SENDER_ID", "ASDAM")
+ARKESEL_SMS_URL = os.environ.get("ARKESEL_SMS_URL", "https://sms.arkesel.com/api/v2/sms/send")
+
 # ── Logging ──────────────────────────────────────────────────────────────────
 LOGGING = {
     "version": 1,

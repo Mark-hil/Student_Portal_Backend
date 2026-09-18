@@ -8,12 +8,79 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from django.contrib.auth import get_user_model
+from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .serializers import RegisterSerializer, UserSerializer, ChangePasswordSerializer
+from .serializers import (
+    RegisterSerializer, UserSerializer, ChangePasswordSerializer,
+    MOHVerifySerializer, MOHRegisterSerializer, MultiIdentifierTokenObtainPairSerializer,
+    StudentRegistrationCompletionSerializer
+)
+from .services.roster_service import process_roster_csv, generate_sample_csv_template
 from core.permissions import IsAdminOrStaff
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
+
+
+class CustomTokenObtainPairView(TokenObtainPairView):
+    """
+    POST /api/v1/auth/login/
+    Multi-identifier authentication supporting Email, Student ID, or MOH PIN.
+    Supports students logging in with their initial Serial Number as temporary password.
+    """
+    serializer_class = MultiIdentifierTokenObtainPairSerializer
+
+
+class VerifyMOHView(APIView):
+    """
+    POST /api/v1/auth/verify-moh/
+    Verify student MOH PIN and Serial Number before portal account activation.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = MOHVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.validated_data["user"]
+        return Response({
+            "status": "verified",
+            "student_id": user.student_id,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "full_name": user.full_name,
+            "moh_pin": user.moh_pin,
+            "program": user.program,
+            "program_label": "Nursing" if user.program == "nursing" else "Midwifery",
+            "class_name": user.class_name,
+            "admission_year": user.admission_year,
+            "email": user.email,
+            "is_registered": user.is_registered,
+        }, status=status.HTTP_200_OK)
+
+
+class RegisterMOHView(APIView):
+    """
+    POST /api/v1/auth/register-moh/
+    Activate student account using verified MOH PIN and Serial Number.
+    Sets personal email, password, and issues JWT tokens.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = MOHRegisterSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        refresh = RefreshToken.for_user(user)
+        logger.info("MOH Student Activated: %s [%s] (%s)", user.full_name, user.student_id, user.program)
+        return Response({
+            "status": "success",
+            "message": "Student portal account activated successfully.",
+            "user": UserSerializer(user, context={"request": request}).data,
+            "tokens": {
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+            },
+        }, status=status.HTTP_200_OK)
 
 
 class RegisterView(generics.CreateAPIView):
@@ -60,7 +127,34 @@ class MeView(generics.RetrieveUpdateAPIView):
         return self.request.user
 
 
+class CompleteRegistrationView(APIView):
+    """
+    POST /api/v1/users/me/complete-registration/
+    Allows authenticated students to submit mandatory profile registration
+    according to info.txt requirements, unlocking their student portal.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        serializer = StudentRegistrationCompletionSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        updated_user = serializer.save(user=user)
+        refresh = RefreshToken.for_user(updated_user)
+        logger.info("Student Registration Completed: %s [%s]", updated_user.full_name, updated_user.student_id)
+        return Response({
+            "status": "success",
+            "message": "Student profile registration completed successfully. Full portal access unlocked.",
+            "user": UserSerializer(updated_user, context={"request": request}).data,
+            "tokens": {
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+            }
+        }, status=status.HTTP_200_OK)
+
+
 class ChangePasswordView(APIView):
+
     """POST /api/v1/users/me/change-password/"""
     permission_classes = [IsAuthenticated]
 
@@ -139,6 +233,16 @@ class UserViewSet(viewsets.ModelViewSet):
         role = self.request.query_params.get("role")
         if role:
             qs = qs.filter(role=role)
+        program = self.request.query_params.get("program")
+        if program:
+            qs = qs.filter(program=program)
+        is_registered = self.request.query_params.get("is_registered")
+        if is_registered is not None and is_registered != "":
+            qs = qs.filter(is_registered=is_registered.lower() in ("true", "1"))
+        class_name = self.request.query_params.get("class_name")
+        if class_name:
+            qs = qs.filter(class_name__iexact=class_name)
+
         search = self.request.query_params.get("search")
         if search:
             from django.db.models import Q
@@ -146,9 +250,55 @@ class UserViewSet(viewsets.ModelViewSet):
                 Q(first_name__icontains=search) |
                 Q(last_name__icontains=search) |
                 Q(email__icontains=search) |
-                Q(student_id__icontains=search)
+                Q(student_id__icontains=search) |
+                Q(moh_pin__icontains=search)
             )
         return qs
+
+    @action(detail=False, methods=["post"], url_path="upload-moh-roster")
+    def upload_moh_roster(self, request):
+        """
+        Upload student roster with MOH PIN and Serial Number.
+        Generates ASDAM Student IDs for Nursing and Midwifery students.
+        """
+        csv_file = request.FILES.get("file") or request.FILES.get("csv_file")
+        if not csv_file:
+            return Response(
+                {"detail": "No CSV file uploaded. Please select a valid student roster file."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        default_program = request.data.get("default_program")
+        default_class = request.data.get("default_class") or "100"
+        default_year = request.data.get("default_year")
+        dry_run = str(request.data.get("dry_run", "")).lower() in ("true", "1")
+
+        try:
+            result = process_roster_csv(
+                csv_file=csv_file,
+                default_program=default_program,
+                default_class=default_class,
+                default_year=default_year,
+                dry_run=dry_run,
+                uploader=request.user,
+            )
+            resp_status = status.HTTP_200_OK if result.get("success") else status.HTTP_400_BAD_REQUEST
+            return Response(result, status=resp_status)
+        except Exception as e:
+            logger.exception("Failed to process MOH roster: %s", e)
+            return Response(
+                {"detail": f"An error occurred while processing the roster: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=["get"], url_path="moh-template")
+    def moh_template(self, request):
+        """Download standard CSV template for MOH student roster upload."""
+        from django.http import HttpResponse
+        csv_content = generate_sample_csv_template()
+        response = HttpResponse(csv_content, content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = 'attachment; filename="asdam_moh_student_roster_template.csv"'
+        return response
 
     def get_serializer_class(self):
         if self.action in ["create", "update", "partial_update"]:
@@ -174,6 +324,20 @@ class UserViewSet(viewsets.ModelViewSet):
         target_user.set_password(new_password)
         target_user.save(update_fields=["password"])
         return Response({"status": "success", "detail": f"Password reset successfully for {target_user.email}."})
+
+    @action(detail=True, methods=["post"], url_path="resend-credentials")
+    def resend_credentials(self, request, pk=None):
+        """Admin action to resend welcome SMS and Email credentials to a student."""
+        target_user = self.get_object()
+        raw_password = target_user.serial_number or "Check with Admissions"
+        from apps.notifications.tasks import dispatch_welcome_notifications
+        result = dispatch_welcome_notifications(user_id=str(target_user.id), raw_password=raw_password)
+        return Response({
+            "status": "success",
+            "message": f"Welcome credentials dispatched via SMS and Email to {target_user.email} ({target_user.phone or 'No phone'}).",
+            "result": result
+        })
+
 
     @action(detail=True, methods=["post"], url_path="avatar")
     def upload_avatar(self, request, pk=None):

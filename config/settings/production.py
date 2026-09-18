@@ -65,13 +65,16 @@ AWS_S3_FILE_OVERWRITE   = False
 
 # Sentry
 SENTRY_DSN = os.environ.get("SENTRY_DSN")
-if SENTRY_DSN:
+if SENTRY_DSN and "project-id" not in SENTRY_DSN and "example" not in SENTRY_DSN and SENTRY_DSN.startswith("http"):
     from sentry_sdk.integrations.django import DjangoIntegration
     from sentry_sdk.integrations.celery import CeleryIntegration
     from sentry_sdk.integrations.redis import RedisIntegration
-    sentry_sdk.init(
-        dsn=SENTRY_DSN,
-        integrations=[DjangoIntegration(), CeleryIntegration(), RedisIntegration()],
-        traces_sample_rate=0.1,
-        send_default_pii=False,
-    )
+    try:
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            integrations=[DjangoIntegration(), CeleryIntegration(), RedisIntegration()],
+            traces_sample_rate=0.1,
+            send_default_pii=False,
+        )
+    except Exception as _sentry_err:
+        pass

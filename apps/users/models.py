@@ -39,6 +39,15 @@ class User(AbstractBaseUser, PermissionsMixin):
         FINANCE = "finance", "Finance Officer"
         ADMIN = "admin", "Admin"
 
+    class AcademicStatus(models.TextChoices):
+        ACTIVE = "active", "Active"
+        PROBATION = "probation", "Academic Probation"
+        REPEATING = "repeating", "Repeating"
+        WITHDRAWN = "withdrawn", "Withdrawn"
+        SUSPENDED = "suspended", "Suspended"
+        GRADUATED = "graduated", "Graduated"
+        DELETED = "deleted", "Deleted / Archived"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email = models.EmailField(unique=True, db_index=True)
     student_id = models.CharField(max_length=50, unique=True, null=True, blank=True, db_index=True)
@@ -48,6 +57,15 @@ class User(AbstractBaseUser, PermissionsMixin):
     class_name = models.CharField(max_length=50, blank=True, default="100")
     admission_year = models.PositiveSmallIntegerField(null=True, blank=True)
     is_registered = models.BooleanField(default=False)
+    academic_status = models.CharField(
+        max_length=20,
+        choices=AcademicStatus.choices,
+        default=AcademicStatus.ACTIVE,
+        db_index=True,
+    )
+    withdrawal_date = models.DateField(null=True, blank=True)
+    withdrawal_reason = models.TextField(blank=True)
+    graduation_date = models.DateField(null=True, blank=True)
     first_name = models.CharField(max_length=150)
     last_name = models.CharField(max_length=150)
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.STUDENT, db_index=True)
@@ -64,6 +82,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     last_login_ip = models.GenericIPAddressField(null=True, blank=True)
 
     objects = UserManager()
+    all_objects = models.Manager()
 
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = ["first_name", "last_name"]
@@ -73,6 +92,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         indexes = [
             models.Index(fields=["role", "is_active"]),
             models.Index(fields=["department", "role"]),
+            models.Index(fields=["role", "academic_status"]),
         ]
 
     def __str__(self):
@@ -85,7 +105,14 @@ class User(AbstractBaseUser, PermissionsMixin):
     def soft_delete(self):
         self.deleted_at = timezone.now()
         self.is_active = False
-        self.save(update_fields=["deleted_at", "is_active"])
+        self.academic_status = self.AcademicStatus.DELETED
+        self.save(update_fields=["deleted_at", "is_active", "academic_status"])
+
+    def restore(self):
+        self.deleted_at = None
+        self.is_active = True
+        self.academic_status = self.AcademicStatus.ACTIVE
+        self.save(update_fields=["deleted_at", "is_active", "academic_status"])
 
     @property
     def is_student_role(self):
@@ -175,3 +202,51 @@ class IDSequence(models.Model):
 
     def __str__(self):
         return f"Seq<{self.program}-{self.class_name}-{self.year}: {self.last_number}>"
+
+
+class AcademicProgressionLog(models.Model):
+    """
+    Immutable audit trail for student academic progression, retention,
+    withdrawals, reinstatements, and lifecycle events.
+    """
+    class ActionType(models.TextChoices):
+        PROMOTION = "promotion", "Promotion"
+        DEMOTION = "demotion", "Demotion"
+        WITHDRAWAL = "withdrawal", "Withdrawal"
+        REINSTATEMENT = "reinstatement", "Reinstatement"
+        GRADUATION = "graduation", "Graduation"
+        STATUS_CHANGE = "status_change", "Status Change"
+        SOFT_DELETE = "soft_delete", "Soft Delete"
+        RESTORE = "restore", "Restore"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name="progression_logs")
+    action = models.CharField(max_length=30, choices=ActionType.choices, db_index=True)
+    from_level = models.CharField(max_length=50, blank=True)
+    to_level = models.CharField(max_length=50, blank=True)
+    from_status = models.CharField(max_length=30, blank=True)
+    to_status = models.CharField(max_length=30, blank=True)
+    reason = models.TextField(blank=True)
+    academic_year = models.CharField(max_length=30, blank=True)
+    semester = models.CharField(max_length=30, blank=True)
+    performed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="authorized_progressions"
+    )
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        db_table = "academic_progression_logs"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["student", "created_at"]),
+            models.Index(fields=["action", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.action} for {self.student.email}: {self.from_level} -> {self.to_level} at {self.created_at}"
+

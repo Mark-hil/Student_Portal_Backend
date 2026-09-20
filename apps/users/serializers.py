@@ -3,7 +3,7 @@ from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
-from .models import UserProfile
+from .models import UserProfile, AcademicProgressionLog
 import logging
 
 logger = logging.getLogger(__name__)
@@ -26,19 +26,28 @@ class UserSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(read_only=True)
     avatar    = serializers.SerializerMethodField()
 
+    is_deleted = serializers.SerializerMethodField()
+
     class Meta:
         model  = User
         fields = [
             "id", "email", "student_id", "moh_pin", "serial_number",
             "program", "class_name", "admission_year", "is_registered",
+            "academic_status", "withdrawal_date", "withdrawal_reason", "graduation_date",
+            "deleted_at", "is_deleted",
             "first_name", "last_name", "full_name",
             "role", "avatar", "phone", "department", "bio", "is_active",
             "email_verified", "created_at", "profile",
         ]
         read_only_fields = [
             "id", "email", "role", "email_verified", "created_at",
-            "student_id", "moh_pin", "program", "class_name", "admission_year"
+            "student_id", "moh_pin", "program", "class_name", "admission_year",
+            "academic_status", "withdrawal_date", "withdrawal_reason", "graduation_date",
+            "deleted_at", "is_deleted"
         ]
+
+    def get_is_deleted(self, obj):
+        return obj.deleted_at is not None
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -419,4 +428,68 @@ class StudentRegistrationCompletionSerializer(serializers.Serializer):
             pass
 
         return user
+
+
+class AcademicProgressionLogSerializer(serializers.ModelSerializer):
+    performed_by_name = serializers.SerializerMethodField()
+    performed_by_email = serializers.SerializerMethodField()
+    action_display = serializers.CharField(source="get_action_display", read_only=True)
+
+    class Meta:
+        model = AcademicProgressionLog
+        fields = [
+            "id", "student", "action", "action_display", "from_level", "to_level",
+            "from_status", "to_status", "reason", "academic_year", "semester",
+            "performed_by", "performed_by_name", "performed_by_email", "metadata", "created_at"
+        ]
+        read_only_fields = fields
+
+    def get_performed_by_name(self, obj):
+        return obj.performed_by.full_name if obj.performed_by else "System"
+
+    def get_performed_by_email(self, obj):
+        return obj.performed_by.email if obj.performed_by else None
+
+
+class PromoteStudentSerializer(serializers.Serializer):
+    target_level = serializers.CharField(required=False, allow_blank=True)
+    academic_year = serializers.CharField(required=False, allow_blank=True)
+    semester = serializers.CharField(required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class DemoteStudentSerializer(serializers.Serializer):
+    target_level = serializers.CharField(required=False, allow_blank=True)
+    reason = serializers.CharField(required=True)
+    academic_year = serializers.CharField(required=False, allow_blank=True)
+    semester = serializers.CharField(required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class WithdrawStudentSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=True)
+    effective_date = serializers.DateField(required=False, allow_null=True)
+    academic_year = serializers.CharField(required=False, allow_blank=True)
+    semester = serializers.CharField(required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class ReinstateStudentSerializer(serializers.Serializer):
+    target_level = serializers.CharField(required=False, allow_blank=True)
+    academic_year = serializers.CharField(required=False, allow_blank=True)
+    semester = serializers.CharField(required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class BulkPromoteSerializer(serializers.Serializer):
+    student_ids = serializers.ListField(child=serializers.UUIDField(), required=True, min_length=1)
+    target_level = serializers.CharField(required=False, allow_blank=True)
+    academic_year = serializers.CharField(required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class HardDeleteStudentSerializer(serializers.Serializer):
+    force = serializers.BooleanField(required=False, default=False)
+    reason = serializers.CharField(required=False, allow_blank=True)
+
 

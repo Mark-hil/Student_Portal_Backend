@@ -8,12 +8,15 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .serializers import (
     RegisterSerializer, UserSerializer, ChangePasswordSerializer,
     MOHVerifySerializer, MOHRegisterSerializer, MultiIdentifierTokenObtainPairSerializer,
-    StudentRegistrationCompletionSerializer
+    StudentRegistrationCompletionSerializer, AcademicProgressionLogSerializer,
+    PromoteStudentSerializer, DemoteStudentSerializer, WithdrawStudentSerializer,
+    ReinstateStudentSerializer, BulkPromoteSerializer, HardDeleteStudentSerializer,
 )
 from .services.roster_service import process_roster_csv, generate_sample_csv_template
 from core.permissions import IsAdminOrStaff
@@ -228,10 +231,37 @@ class UserViewSet(viewsets.ModelViewSet):
     """Admin endpoint to manage users."""
     permission_classes = [IsAdminOrStaff]
 
+    def get_object(self):
+        # Allow looking up soft-deleted users for restore or permanent deletion actions
+        if self.action in ("restore", "permanent_delete", "progression_history") or self.request.query_params.get("include_deleted") in ("true", "1"):
+            queryset = User.all_objects.all()
+            lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+            filter_kwargs = {self.lookup_field: self.kwargs[lookup_url_kwarg]}
+            from django.shortcuts import get_object_or_404
+            obj = get_object_or_404(queryset, **filter_kwargs)
+            self.check_object_permissions(self.request, obj)
+            return obj
+        return super().get_object()
+
     def get_queryset(self):
-        qs = User.objects.all().order_by("-created_at")
+        academic_status = self.request.query_params.get("academic_status") or self.request.query_params.get("status")
+        include_deleted = self.request.query_params.get("include_deleted", "").lower() in ("true", "1")
+
+        if academic_status == "deleted" or include_deleted:
+            qs = User.all_objects.all().order_by("-created_at")
+        else:
+            qs = User.objects.all().order_by("-created_at")
+
+        if academic_status:
+            if academic_status == "deleted":
+                qs = qs.filter(deleted_at__isnull=False)
+            elif academic_status == "active":
+                qs = qs.filter(deleted_at__isnull=True, is_active=True, academic_status="active")
+            else:
+                qs = qs.filter(academic_status=academic_status)
+
         role = self.request.query_params.get("role")
-        if role:
+        if role and role != "all":
             qs = qs.filter(role=role)
         program = self.request.query_params.get("program")
         if program:
@@ -254,6 +284,14 @@ class UserViewSet(viewsets.ModelViewSet):
                 Q(moh_pin__icontains=search)
             )
         return qs
+
+    def destroy(self, request, *args, **kwargs):
+        """Default DELETE performs a safe soft-delete / archive to trash."""
+        target_user = self.get_object()
+        reason = request.data.get("reason") or request.query_params.get("reason") or "Deleted via management console"
+        from apps.users.services.progression_service import soft_delete_student
+        result = soft_delete_student(target_user, reason=reason, actor=request.user)
+        return Response(result, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["post"], url_path="upload-moh-roster")
     def upload_moh_roster(self, request):
@@ -384,6 +422,165 @@ class UserViewSet(viewsets.ModelViewSet):
             target_user.save(update_fields=["avatar"])
 
         return Response(UserSerializer(target_user, context={"request": request}).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="promote")
+    def promote(self, request, pk=None):
+        target_user = self.get_object()
+        serializer = PromoteStudentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        from apps.users.services.progression_service import promote_student
+        try:
+            result = promote_student(
+                student=target_user,
+                target_level=serializer.validated_data.get("target_level"),
+                academic_year=serializer.validated_data.get("academic_year", ""),
+                semester=serializer.validated_data.get("semester", ""),
+                notes=serializer.validated_data.get("notes", ""),
+                actor=request.user,
+            )
+            result["user"] = UserSerializer(target_user, context={"request": request}).data
+            return Response(result, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            msg = e.message if hasattr(e, "message") else str(e)
+            return Response({"detail": msg}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=["post"], url_path="demote")
+    def demote(self, request, pk=None):
+        target_user = self.get_object()
+        serializer = DemoteStudentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        from apps.users.services.progression_service import demote_student
+        try:
+            result = demote_student(
+                student=target_user,
+                target_level=serializer.validated_data.get("target_level"),
+                reason=serializer.validated_data["reason"],
+                academic_year=serializer.validated_data.get("academic_year", ""),
+                semester=serializer.validated_data.get("semester", ""),
+                notes=serializer.validated_data.get("notes", ""),
+                actor=request.user,
+            )
+            result["user"] = UserSerializer(target_user, context={"request": request}).data
+            return Response(result, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            msg = e.message if hasattr(e, "message") else str(e)
+            return Response({"detail": msg}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=["post"], url_path="withdraw")
+    def withdraw(self, request, pk=None):
+        target_user = self.get_object()
+        serializer = WithdrawStudentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        from apps.users.services.progression_service import withdraw_student
+        try:
+            result = withdraw_student(
+                student=target_user,
+                reason=serializer.validated_data["reason"],
+                effective_date=serializer.validated_data.get("effective_date"),
+                academic_year=serializer.validated_data.get("academic_year", ""),
+                semester=serializer.validated_data.get("semester", ""),
+                notes=serializer.validated_data.get("notes", ""),
+                actor=request.user,
+            )
+            result["user"] = UserSerializer(target_user, context={"request": request}).data
+            return Response(result, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            msg = e.message if hasattr(e, "message") else str(e)
+            return Response({"detail": msg}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=["post"], url_path="reinstate")
+    def reinstate(self, request, pk=None):
+        target_user = self.get_object()
+        serializer = ReinstateStudentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        from apps.users.services.progression_service import reinstate_student
+        try:
+            result = reinstate_student(
+                student=target_user,
+                target_level=serializer.validated_data.get("target_level"),
+                academic_year=serializer.validated_data.get("academic_year", ""),
+                semester=serializer.validated_data.get("semester", ""),
+                notes=serializer.validated_data.get("notes", ""),
+                actor=request.user,
+            )
+            result["user"] = UserSerializer(target_user, context={"request": request}).data
+            return Response(result, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            msg = e.message if hasattr(e, "message") else str(e)
+            return Response({"detail": msg}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=["post"], url_path="soft-delete")
+    def soft_delete(self, request, pk=None):
+        target_user = self.get_object()
+        reason = request.data.get("reason", "")
+        from apps.users.services.progression_service import soft_delete_student
+        result = soft_delete_student(target_user, reason=reason, actor=request.user)
+        return Response(result, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="restore")
+    def restore(self, request, pk=None):
+        target_user = self.get_object()
+        from apps.users.services.progression_service import restore_student
+        result = restore_student(target_user, actor=request.user)
+        result["user"] = UserSerializer(target_user, context={"request": request}).data
+        return Response(result, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["delete", "post"], url_path="permanent-delete")
+    def permanent_delete(self, request, pk=None):
+        if request.user.role != "admin" and not request.user.is_superuser:
+            return Response(
+                {"detail": "Permission denied: Only System Administrators can permanently purge student records."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        target_user = self.get_object()
+        serializer = HardDeleteStudentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        force = serializer.validated_data.get("force", False)
+
+        from apps.users.services.progression_service import hard_delete_student
+        try:
+            result = hard_delete_student(target_user, force=force, actor=request.user)
+            return Response(result, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            msg = e.message if hasattr(e, "message") else str(e)
+            return Response({"detail": msg}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=["get"], url_path="deletion-precheck")
+    def deletion_precheck(self, request, pk=None):
+        target_user = self.get_object()
+        from apps.users.services.progression_service import can_hard_delete_student
+        can_delete, blockers = can_hard_delete_student(target_user)
+        return Response({
+            "can_hard_delete": can_delete,
+            "blockers": blockers,
+            "student_id": target_user.student_id,
+            "name": target_user.full_name,
+        })
+
+    @action(detail=False, methods=["post"], url_path="bulk-promote")
+    def bulk_promote(self, request):
+        serializer = BulkPromoteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        from apps.users.services.progression_service import bulk_promote_cohort
+        try:
+            result = bulk_promote_cohort(
+                student_ids=[str(i) for i in serializer.validated_data["student_ids"]],
+                target_level=serializer.validated_data.get("target_level"),
+                academic_year=serializer.validated_data.get("academic_year", ""),
+                notes=serializer.validated_data.get("notes", ""),
+                actor=request.user,
+            )
+            return Response(result, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            msg = e.message if hasattr(e, "message") else str(e)
+            return Response({"detail": msg}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=["get"], url_path="progression-history")
+    def progression_history(self, request, pk=None):
+        target_user = self.get_object()
+        logs = target_user.progression_logs.all().order_by("-created_at")
+        return Response(AcademicProgressionLogSerializer(logs, many=True).data)
 
     @action(detail=False, methods=["get"], url_path="export-students")
     def export_students(self, request):

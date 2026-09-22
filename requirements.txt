@@ -27,10 +27,14 @@ sentry-sdk[django,celery]==2.3.1
 # ── Utilities ────────────────────────────────────────────────────────────────
 Pillow==10.3.0
 python-dotenv==1.0.1
+requests>=2.31.0
+openpyxl==3.1.5
 
 # ── Testing ──────────────────────────────────────────────────────────────────
 pytest==8.1.1
 pytest-django==4.8.0
+pytest-cov>=5.0.0
+coverage>=7.5.0
 
 daphne==4.1.2
 channels==4.1.0

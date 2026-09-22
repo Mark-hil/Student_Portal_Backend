@@ -14,6 +14,13 @@ __pycache__/
 .pytest_cache/
 db.sqlite3
 
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+coverage*.xml
+
 # Django Media/Static
 media/
 static/

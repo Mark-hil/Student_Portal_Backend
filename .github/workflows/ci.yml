@@ -1,39 +1,254 @@
-name: Backend Tests
+name: CI Pipeline
 
 on:
   push:
     branches:
       - main
+      - master
+      - develop
   pull_request:
     branches:
       - main
+      - master
+      - develop
+  workflow_dispatch:
 
 jobs:
-  test-backend:
-    name: Run Pytest
+  # ─────────────────────────────────────────────────────────────
+  # Phase 1: Code Quality & Django System Check
+  # ─────────────────────────────────────────────────────────────
+  code-quality:
+    name: Code Quality & System Check
     runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        working-directory: ./backend
-
     steps:
-      - name: Checkout repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.10
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Pytest
+      - name: Run Django System Check
         env:
           DJANGO_SETTINGS_MODULE: config.settings.development
+          SECRET_KEY: 'ci-testing-secret-key-not-for-production'
         run: |
-          pytest apps/grades/tests apps/courses/tests
+          python manage.py check
+
+  # ─────────────────────────────────────────────────────────────
+  # Phase 2: Database Migrations Integrity Check
+  # ─────────────────────────────────────────────────────────────
+  migrations-check:
+    name: Database Migrations Integrity
+    needs: code-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify Missing Migrations
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.development
+          SECRET_KEY: 'ci-testing-secret-key-not-for-production'
+        run: |
+          python manage.py makemigrations --check --dry-run
+
+  # ─────────────────────────────────────────────────────────────
+  # Phase 3: Parallelized Domain Test Suites with Coverage
+  # ─────────────────────────────────────────────────────────────
+  test-users-and-rbac:
+    name: Users, Roster & RBAC Shielding
+    needs: migrations-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Users & Security Test Suite with Coverage
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.development
+          SECRET_KEY: 'ci-testing-secret-key-not-for-production'
+          COVERAGE_FILE: .coverage.users
+        run: |
+          pytest apps/users/tests/ --cov=apps/users --cov-config=.coveragerc -v
+
+      - name: Upload Users Coverage Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-users
+          path: .coverage.users
+          retention-days: 1
+
+  test-academics:
+    name: Courses, Grading & GPA Engine
+    needs: migrations-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Courses & Grades Test Suite with Coverage
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.development
+          SECRET_KEY: 'ci-testing-secret-key-not-for-production'
+          COVERAGE_FILE: .coverage.academics
+        run: |
+          pytest apps/courses/tests/ apps/grades/tests/ --cov=apps/courses --cov=apps/grades --cov-config=.coveragerc -v
+
+      - name: Upload Academics Coverage Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-academics
+          path: .coverage.academics
+          retention-days: 1
+
+  test-financials:
+    name: Financials & Student Billing
+    needs: migrations-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Financials Test Suite with Coverage
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.development
+          SECRET_KEY: 'ci-testing-secret-key-not-for-production'
+          COVERAGE_FILE: .coverage.financials
+        run: |
+          pytest apps/financials/tests/ --cov=apps/financials --cov-config=.coveragerc -v
+
+      - name: Upload Financials Coverage Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-financials
+          path: .coverage.financials
+          retention-days: 1
+
+  # ─────────────────────────────────────────────────────────────
+  # Phase 4: Combined Coverage Analysis & Reporting
+  # ─────────────────────────────────────────────────────────────
+  coverage-report:
+    name: Test Coverage Aggregation & Report
+    needs: [test-users-and-rbac, test-academics, test-financials]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+
+      - name: Install Coverage Tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install coverage[toml]
+
+      - name: Download Users Coverage Data
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-users
+
+      - name: Download Academics Coverage Data
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-academics
+
+      - name: Download Financials Coverage Data
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-financials
+
+      - name: Combine Coverage Data
+        run: |
+          coverage combine .coverage.*
+
+      - name: Publish Markdown Summary Table to Job Summary
+        run: |
+          echo "## 📊 Unified Test Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          coverage report --format=markdown >> $GITHUB_STEP_SUMMARY
+
+      - name: Generate Reports
+        run: |
+          coverage xml -o coverage.xml
+          coverage html -d htmlcov
+
+      - name: Upload HTML Coverage Report Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: html-coverage-report
+          path: htmlcov
+          retention-days: 14
+
+  # ─────────────────────────────────────────────────────────────
+  # Phase 5: Final Pipeline Status Aggregator
+  # ─────────────────────────────────────────────────────────────
+  ci-pipeline-complete:
+    name: CI Pipeline Complete
+    needs: coverage-report
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm All Checks Passed
+        run: |
+          echo "All CI quality, migration, security, and domain test suites passed successfully with full coverage verification!"

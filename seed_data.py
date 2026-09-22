@@ -18,13 +18,13 @@ def seed():
     print("🚀 Starting Comprehensive Database Seed...")
 
     # ── 1. USERS ─────────────────────────────────────────────────────────────
-    print("1. Creating Users...")
+    print("1. Creating Users for all 6 Institutional Roles...")
     admin, _ = User.objects.get_or_create(
         email="admin@uniportal.edu", 
         defaults={
             "first_name": "Alice",
             "last_name": "Admin",
-            "role": "admin",
+            "role": "super_admin",
             "is_staff": True,
             "is_superuser": True,
             "department": "IT & Systems",
@@ -32,41 +32,90 @@ def seed():
         }
     )
     admin.set_password("password123")
-    admin.role = "admin"
+    admin.role = "super_admin"
     admin.is_staff = True
     admin.is_superuser = True
     admin.save()
 
-    lecturer, _ = User.objects.get_or_create(
-        email="lecturer@uniportal.edu", 
+    academic_officer, _ = User.objects.get_or_create(
+        email="academic@uniportal.edu",
         defaults={
-            "first_name": "Dr. Alan",
-            "last_name": "Turing",
-            "role": "instructor",
-            "department": "Computer Science",
-            "bio": "Professor of Computer Science specializing in Algorithms, Complexity Theory, and Machine Learning.",
+            "first_name": "Sarah",
+            "last_name": "Connor",
+            "role": "academic_officer",
+            "is_staff": True,
+            "department": "Academic Affairs & Registrar",
             "email_verified": True,
         }
     )
-    lecturer.set_password("password123")
-    lecturer.role = "instructor"
-    lecturer.save()
+    academic_officer.set_password("password123")
+    academic_officer.role = "academic_officer"
+    academic_officer.is_staff = True
+    academic_officer.save()
 
+    # Legacy alias staff user
     staff, _ = User.objects.get_or_create(
         email="staff@uniportal.edu",
         defaults={
             "first_name": "Sarah",
             "last_name": "Connor",
-            "role": "staff",
+            "role": "academic_officer",
             "is_staff": True,
             "department": "Academic Registrar & Records",
             "email_verified": True,
         }
     )
     staff.set_password("password123")
-    staff.role = "staff"
+    staff.role = "academic_officer"
     staff.is_staff = True
     staff.save()
+
+    hod, _ = User.objects.get_or_create(
+        email="hod@uniportal.edu",
+        defaults={
+            "first_name": "Dr. Margaret",
+            "last_name": "Hamilton",
+            "role": "head_of_department",
+            "is_staff": True,
+            "department": "Computer Science",
+            "bio": "Head of Computer Science Department, leading software engineering and curriculum quality.",
+            "email_verified": True,
+        }
+    )
+    hod.set_password("password123")
+    hod.role = "head_of_department"
+    hod.is_staff = True
+    hod.save()
+
+    finance, _ = User.objects.get_or_create(
+        email="finance@uniportal.edu",
+        defaults={
+            "first_name": "Marcus",
+            "last_name": "Thorne",
+            "role": "finance",
+            "is_staff": False,
+            "department": "Treasury & Student Accounts",
+            "email_verified": True,
+        }
+    )
+    finance.set_password("password123")
+    finance.role = "finance"
+    finance.save()
+
+    lecturer, _ = User.objects.get_or_create(
+        email="lecturer@uniportal.edu", 
+        defaults={
+            "first_name": "Dr. Alan",
+            "last_name": "Turing",
+            "role": "lecturer",
+            "department": "Computer Science",
+            "bio": "Professor of Computer Science specializing in Algorithms, Complexity Theory, and Machine Learning.",
+            "email_verified": True,
+        }
+    )
+    lecturer.set_password("password123")
+    lecturer.role = "lecturer"
+    lecturer.save()
 
     student, _ = User.objects.get_or_create(
         email="student@uniportal.edu", 
@@ -569,11 +618,13 @@ def seed():
     print(f"  • Spring 2025 Semester GPA: {res_curr['semester_gpa']}  (14 Credits)")
     print(f"  • Total Cumulative GPA:     {res_curr['cumulative_gpa']}  (37 Total Credits)")
     print("="*70)
-    print("Demo User Logins (Password: 'password123' for all):")
-    print("  • Student:              student@uniportal.edu  (Alex Mercer, ID: STU-2024-8891)")
+    print("Demo User Logins for all 6 Institutional Roles (Password: 'password123' for all):")
+    print("  • Super Admin:          admin@uniportal.edu    (Alice Admin)")
+    print("  • Academic Officer:     academic@uniportal.edu (Sarah Connor)")
+    print("  • Head of Department:   hod@uniportal.edu      (Dr. Margaret Hamilton)")
+    print("  • Finance Officer:      finance@uniportal.edu  (Marcus Thorne)")
     print("  • Lecturer:             lecturer@uniportal.edu (Dr. Alan Turing)")
-    print("  • Staff (Officer):      staff@uniportal.edu    (Sarah Connor)")
-    print("  • System Admin:         admin@uniportal.edu    (Alice Admin)")
+    print("  • Student:              student@uniportal.edu  (Alex Mercer, ID: STU-2024-8891)")
     print("="*70)
 
 if __name__ == "__main__":

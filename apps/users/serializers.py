@@ -25,6 +25,8 @@ class UserSerializer(serializers.ModelSerializer):
     profile   = UserProfileSerializer(read_only=True)
     full_name = serializers.CharField(read_only=True)
     avatar    = serializers.SerializerMethodField()
+    assigned_functions = serializers.ListField(child=serializers.CharField(), read_only=True)
+    effective_functions = serializers.SerializerMethodField()
 
     is_deleted = serializers.SerializerMethodField()
 
@@ -36,15 +38,20 @@ class UserSerializer(serializers.ModelSerializer):
             "academic_status", "withdrawal_date", "withdrawal_reason", "graduation_date",
             "deleted_at", "is_deleted",
             "first_name", "last_name", "full_name",
-            "role", "avatar", "phone", "department", "bio", "is_active",
+            "role", "assigned_functions", "effective_functions",
+            "avatar", "phone", "department", "bio", "is_active",
             "email_verified", "created_at", "profile",
         ]
         read_only_fields = [
-            "id", "email", "role", "email_verified", "created_at",
+            "id", "email", "role", "assigned_functions", "effective_functions",
+            "email_verified", "created_at",
             "student_id", "moh_pin", "program", "class_name", "admission_year",
             "academic_status", "withdrawal_date", "withdrawal_reason", "graduation_date",
             "deleted_at", "is_deleted"
         ]
+
+    def get_effective_functions(self, obj):
+        return getattr(obj, "effective_functions", [])
 
     def get_is_deleted(self, obj):
         return obj.deleted_at is not None
@@ -53,7 +60,10 @@ class UserSerializer(serializers.ModelSerializer):
         data = super().to_representation(instance)
         request = self.context.get("request")
         # Defense-in-depth: only admin/staff or student themselves may see serial_number
-        is_staff_or_admin = request and request.user.is_authenticated and request.user.role in ("admin", "staff")
+        is_staff_or_admin = (
+            request and request.user.is_authenticated and 
+            (request.user.is_superuser or getattr(request.user, "normalized_role", request.user.role) in ("super_admin", "academic_officer", "admin", "staff"))
+        )
         is_owner = request and request.user.is_authenticated and request.user.id == instance.id
         if not (is_staff_or_admin or is_owner):
             data.pop("serial_number", None)
@@ -491,5 +501,32 @@ class BulkPromoteSerializer(serializers.Serializer):
 class HardDeleteStudentSerializer(serializers.Serializer):
     force = serializers.BooleanField(required=False, default=False)
     reason = serializers.CharField(required=False, allow_blank=True)
+
+
+class AssignRoleAndFunctionsSerializer(serializers.Serializer):
+    role = serializers.CharField(required=False, allow_blank=True)
+    assigned_functions = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+        default=list
+    )
+
+    def validate_role(self, value):
+        if value:
+            from .constants import normalize_role, RoleChoice
+            normalized = normalize_role(value)
+            valid_roles = [r[0] for r in RoleChoice.CHOICES]
+            if normalized not in valid_roles:
+                raise serializers.ValidationError(f"Invalid role '{value}'. Must be one of: {valid_roles}")
+            return normalized
+        return value
+
+    def validate_assigned_functions(self, value):
+        from .constants import ALL_FUNCTION_CODES
+        invalid = [code for code in value if code not in ALL_FUNCTION_CODES]
+        if invalid:
+            raise serializers.ValidationError(f"Invalid capability codes: {invalid}")
+        return value
+
 
 

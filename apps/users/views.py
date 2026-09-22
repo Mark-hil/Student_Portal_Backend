@@ -17,6 +17,7 @@ from .serializers import (
     StudentRegistrationCompletionSerializer, AcademicProgressionLogSerializer,
     PromoteStudentSerializer, DemoteStudentSerializer, WithdrawStudentSerializer,
     ReinstateStudentSerializer, BulkPromoteSerializer, HardDeleteStudentSerializer,
+    AssignRoleAndFunctionsSerializer,
 )
 from .services.roster_service import process_roster_csv, generate_sample_csv_template
 from core.permissions import IsAdminOrStaff
@@ -581,6 +582,76 @@ class UserViewSet(viewsets.ModelViewSet):
         target_user = self.get_object()
         logs = target_user.progression_logs.all().order_by("-created_at")
         return Response(AcademicProgressionLogSerializer(logs, many=True).data)
+
+    @action(detail=False, methods=["get"], url_path="roles-and-functions")
+    def roles_and_functions(self, request):
+        """
+        Returns the catalog of institutional portal roles with default functions,
+        and all granular functional capabilities.
+        """
+        from .constants import PORTAL_ROLES, PORTAL_FUNCTIONS
+        return Response({
+            "roles": PORTAL_ROLES,
+            "functions": PORTAL_FUNCTIONS,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="assign-role-and-functions")
+    def assign_role_and_functions(self, request, pk=None):
+        """
+        Assigns or updates an institutional role and granular capabilities for a user.
+        Authorized for Super Admin or users with 'users.manage_roles' capability.
+        """
+        if not (request.user.is_super_admin or request.user.has_portal_permission("users.manage_roles")):
+            return Response(
+                {"detail": "Permission denied: Requires role management authority."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        target_user = self.get_object()
+        serializer = AssignRoleAndFunctionsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        new_role = serializer.validated_data.get("role")
+        assigned_functions = serializer.validated_data.get("assigned_functions", [])
+
+        # Prevent a non-superuser from demoting a superuser or themselves if sole admin
+        if target_user.is_superuser and not request.user.is_superuser:
+            return Response(
+                {"detail": "Permission denied: Only database superusers can modify a superuser's role."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        old_role = target_user.role
+        if new_role:
+            target_user.role = new_role
+            if new_role in ("super_admin", "admin", "academic_officer", "staff"):
+                target_user.is_staff = True
+            elif new_role in ("student", "lecturer", "finance"):
+                if not target_user.is_superuser:
+                    target_user.is_staff = False
+
+        target_user.assigned_functions = assigned_functions
+        target_user.save(update_fields=["role", "assigned_functions", "is_staff"])
+
+        from .models import AcademicProgressionLog
+        AcademicProgressionLog.objects.create(
+            student=target_user,
+            action=AcademicProgressionLog.ActionType.STATUS_CHANGE,
+            from_status=f"Role:{old_role}",
+            to_status=f"Role:{target_user.role}",
+            reason=f"Role & permissions updated by {request.user.email}",
+            performed_by=request.user,
+            metadata={
+                "assigned_functions": assigned_functions,
+                "effective_functions": target_user.effective_functions,
+            }
+        )
+
+        return Response({
+            "status": "success",
+            "message": f"Successfully updated role and capabilities for {target_user.full_name or target_user.email}.",
+            "user": UserSerializer(target_user, context={"request": request}).data,
+        }, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["get"], url_path="export-students")
     def export_students(self, request):

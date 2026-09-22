@@ -24,7 +24,7 @@ class UserManager(BaseUserManager):
     def create_superuser(self, email, password=None, **extra_fields):
         extra_fields.setdefault("is_staff", True)
         extra_fields.setdefault("is_superuser", True)
-        extra_fields.setdefault("role", "admin")
+        extra_fields.setdefault("role", "super_admin")
         return self.create_user(email, password, **extra_fields)
 
     def get_queryset(self):
@@ -33,11 +33,16 @@ class UserManager(BaseUserManager):
 
 class User(AbstractBaseUser, PermissionsMixin):
     class Role(models.TextChoices):
-        STUDENT = "student", "Student"
-        INSTRUCTOR = "instructor", "Instructor"
-        STAFF = "staff", "Staff"
+        SUPER_ADMIN = "super_admin", "Super Admin"
+        ACADEMIC_OFFICER = "academic_officer", "Academic Officer"
+        HEAD_OF_DEPARTMENT = "head_of_department", "Head of Department"
         FINANCE = "finance", "Finance Officer"
-        ADMIN = "admin", "Admin"
+        LECTURER = "lecturer", "Lecturer"
+        STUDENT = "student", "Student"
+        # Backward-compatible aliases
+        ADMIN = "admin", "Admin (Legacy)"
+        STAFF = "staff", "Staff (Legacy)"
+        INSTRUCTOR = "instructor", "Instructor (Legacy)"
 
     class AcademicStatus(models.TextChoices):
         ACTIVE = "active", "Active"
@@ -68,7 +73,8 @@ class User(AbstractBaseUser, PermissionsMixin):
     graduation_date = models.DateField(null=True, blank=True)
     first_name = models.CharField(max_length=150)
     last_name = models.CharField(max_length=150)
-    role = models.CharField(max_length=20, choices=Role.choices, default=Role.STUDENT, db_index=True)
+    role = models.CharField(max_length=30, choices=Role.choices, default=Role.STUDENT, db_index=True)
+    assigned_functions = models.JSONField(default=list, blank=True)
     avatar = models.ImageField(upload_to="avatars/%Y/%m/", null=True, blank=True, max_length=500)
     phone = models.CharField(max_length=20, blank=True)
     department = models.CharField(max_length=100, blank=True)
@@ -115,16 +121,49 @@ class User(AbstractBaseUser, PermissionsMixin):
         self.save(update_fields=["deleted_at", "is_active", "academic_status"])
 
     @property
-    def is_student_role(self):
-        return self.role == self.Role.STUDENT
+    def normalized_role(self):
+        from .constants import normalize_role
+        return normalize_role(self.role)
 
     @property
-    def is_instructor_role(self):
-        return self.role == self.Role.INSTRUCTOR
+    def effective_functions(self):
+        from .constants import get_effective_functions
+        return get_effective_functions(self.role, self.assigned_functions)
+
+    def has_portal_permission(self, function_code: str) -> bool:
+        if not self.is_active:
+            return False
+        if self.is_superuser or self.normalized_role == "super_admin":
+            return True
+        return function_code in self.effective_functions
+
+    @property
+    def is_super_admin(self):
+        return self.is_superuser or self.normalized_role == "super_admin"
+
+    @property
+    def is_academic_officer(self):
+        return self.normalized_role == "academic_officer" or self.is_super_admin
+
+    @property
+    def is_hod(self):
+        return self.normalized_role == "head_of_department" or self.is_super_admin
 
     @property
     def is_finance_role(self):
-        return self.role in (self.Role.FINANCE, self.Role.ADMIN)
+        return self.normalized_role == "finance" or self.is_super_admin
+
+    @property
+    def is_lecturer_role(self):
+        return self.normalized_role == "lecturer" or self.is_super_admin
+
+    @property
+    def is_instructor_role(self):
+        return self.is_lecturer_role
+
+    @property
+    def is_student_role(self):
+        return self.normalized_role == "student"
 
     @property
     def academic_level(self):

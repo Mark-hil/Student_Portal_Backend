@@ -212,3 +212,78 @@ class TestMOHRosterUploadAndAuth:
         assert initial_login.status_code == 200
         assert initial_login.data["user"]["student_id"] == student_id
         assert initial_login.data["user"]["is_registered"] is False
+
+    def test_roster_upload_without_serial_number_generates_vouchers(self, admin_user):
+        """MOH lists frequently omit voucher serials; ensure auto-generation works."""
+        client = APIClient()
+        client.force_authenticate(user=admin_user)
+
+        csv_data = (
+            "moh_pin,first_name,last_name,program,phone\n"
+            "MOH-NUR-AUTO1,Kofi,Osei,Nursing,0240001111\n"
+            "MOH-NUR-AUTO2,Yaa,Ansah,Nursing,0240002222\n"
+        )
+        csv_file = SimpleUploadedFile("freshers.csv", csv_data.encode("utf-8"), content_type="text/csv")
+        res = client.post("/api/v1/users/manage/upload-moh-roster/", {"file": csv_file}, format="multipart")
+        assert res.status_code == 200
+        assert res.data["imported_count"] == 2
+        for st in res.data["students"]:
+            assert st["serial_number"].startswith("SN-")
+            user = User.objects.get(moh_pin=st["moh_pin"])
+            assert user.check_password(st["serial_number"]) is True
+
+    def test_roster_upload_with_full_name_column(self):
+        """Single name column should split correctly into first and last name."""
+        csv_content = (
+            "Index No.,Full Name,Programme\n"
+            "MOH-MID-FULL1,Ama Serwaa Konadu,Midwifery\n"
+        )
+        result = process_roster_csv(csv_content)
+        assert result["success"] is True
+        assert result["imported_count"] == 1
+        st = result["students"][0]
+        assert st["first_name"] == "Ama"
+        assert st["last_name"] == "Serwaa Konadu"
+        assert st["program"] == "midwifery"
+
+    def test_roster_upload_xlsx_format(self, admin_user):
+        """Excel .xlsx files should be parsed seamlessly."""
+        import io
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Freshers"
+        ws.append(["MOH PIN", "First Name", "Last Name", "Program", "Phone"])
+        ws.append(["MOH-NUR-XLSX1", "Kwame", "Appiah", "General Nursing", "0551234567"])
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+
+        client = APIClient()
+        client.force_authenticate(user=admin_user)
+        xlsx_file = SimpleUploadedFile(
+            "freshers.xlsx",
+            buf.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        res = client.post("/api/v1/users/manage/upload-moh-roster/", {"file": xlsx_file}, format="multipart")
+        assert res.status_code == 200
+        assert res.data["imported_count"] == 1
+        assert res.data["students"][0]["moh_pin"] == "MOH-NUR-XLSX1"
+
+    def test_roster_upload_validation_failure_returns_detail(self, admin_user):
+        """Ensure failed upload returns HTTP 400 with 'detail' and 'errors'."""
+        client = APIClient()
+        client.force_authenticate(user=admin_user)
+
+        # Missing both name and identifier columns entirely
+        bad_csv = "Gender,Status,Remark\nFemale,Admitted,Paid\n"
+        csv_file = SimpleUploadedFile("bad.csv", bad_csv.encode("utf-8"), content_type="text/csv")
+        res = client.post("/api/v1/users/manage/upload-moh-roster/", {"file": csv_file}, format="multipart")
+        assert res.status_code == 400
+        assert "detail" in res.data
+        assert "Could not detect student names or identifiers" in res.data["detail"]
+        assert len(res.data["errors"]) > 0
+

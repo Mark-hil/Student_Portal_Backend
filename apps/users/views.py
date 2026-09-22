@@ -241,8 +241,15 @@ class UserViewSet(viewsets.ModelViewSet):
             from django.shortcuts import get_object_or_404
             obj = get_object_or_404(queryset, **filter_kwargs)
             self.check_object_permissions(self.request, obj)
+            if obj.is_super_admin and not (self.request.user and getattr(self.request.user, "is_super_admin", False)):
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied("Permission denied: Super Administrator accounts are restricted.")
             return obj
-        return super().get_object()
+        obj = super().get_object()
+        if obj.is_super_admin and not (self.request.user and getattr(self.request.user, "is_super_admin", False)):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Permission denied: Super Administrator accounts are restricted.")
+        return obj
 
     def get_queryset(self):
         academic_status = self.request.query_params.get("academic_status") or self.request.query_params.get("status")
@@ -252,6 +259,11 @@ class UserViewSet(viewsets.ModelViewSet):
             qs = User.all_objects.all().order_by("-created_at")
         else:
             qs = User.objects.all().order_by("-created_at")
+
+        # Shield Super Administrator accounts from non-superadmin actors
+        user = getattr(self.request, "user", None)
+        if not (user and getattr(user, "is_super_admin", False)):
+            qs = qs.exclude(role="super_admin").exclude(is_superuser=True)
 
         if academic_status:
             if academic_status == "deleted":
@@ -264,6 +276,22 @@ class UserViewSet(viewsets.ModelViewSet):
         role = self.request.query_params.get("role")
         if role and role != "all":
             qs = qs.filter(role=role)
+
+        user_type = self.request.query_params.get("user_type")
+        if user_type == "student":
+            qs = qs.filter(role="student")
+        elif user_type in ("staff", "faculty"):
+            qs = qs.exclude(role="student")
+
+        department = self.request.query_params.get("department")
+        if department:
+            from django.db.models import Q
+            qs = qs.filter(Q(department__icontains=department) | Q(profile__major__icontains=department))
+        elif user and getattr(user, "is_hod", False) and not getattr(user, "is_super_admin", False) and user_type in ("staff", "faculty"):
+            # HOD viewing staff should default to their department
+            if user.department:
+                qs = qs.filter(department__icontains=user.department)
+
         program = self.request.query_params.get("program")
         if program:
             qs = qs.filter(program=program)
@@ -289,6 +317,16 @@ class UserViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         """Default DELETE performs a safe soft-delete / archive to trash."""
         target_user = self.get_object()
+        if target_user.is_super_admin and not getattr(request.user, "is_super_admin", False):
+            return Response(
+                {"detail": "Permission denied: Only Super Administrators can delete a Super Administrator account."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        if target_user == request.user and target_user.is_super_admin:
+            return Response(
+                {"detail": "Security violation: Super Administrators cannot delete their own active account."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         reason = request.data.get("reason") or request.query_params.get("reason") or "Deleted via management console"
         from apps.users.services.progression_service import soft_delete_student
         result = soft_delete_student(target_user, reason=reason, actor=request.user)
@@ -321,8 +359,17 @@ class UserViewSet(viewsets.ModelViewSet):
                 dry_run=dry_run,
                 uploader=request.user,
             )
-            resp_status = status.HTTP_200_OK if result.get("success") else status.HTTP_400_BAD_REQUEST
-            return Response(result, status=resp_status)
+            is_success = result.get("success") and (result.get("imported_count", 0) > 0 or (dry_run and result.get("total_rows", 0) > 0))
+            if not is_success:
+                errors_list = result.get("errors") or []
+                if errors_list and errors_list[0].get("error"):
+                    first_err = errors_list[0].get("error")
+                else:
+                    first_err = "No new student records were imported. All records in this file may already be registered."
+                result["detail"] = first_err
+                return Response(result, status=status.HTTP_400_BAD_REQUEST)
+
+            return Response(result, status=status.HTTP_200_OK)
         except Exception as e:
             logger.exception("Failed to process MOH roster: %s", e)
             return Response(
@@ -345,9 +392,55 @@ class UserViewSet(viewsets.ModelViewSet):
             return AdminCreateUserSerializer
         return UserSerializer
 
+    def create(self, request, *args, **kwargs):
+        if request.data.get("role") == "super_admin" and not getattr(request.user, "is_super_admin", False):
+            return Response(
+                {"detail": "Permission denied: Only Super Administrators can create Super Administrator accounts."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        target_user = self.get_object()
+        if target_user.is_super_admin and not getattr(request.user, "is_super_admin", False):
+            return Response(
+                {"detail": "Permission denied: Only Super Administrators can modify a Super Administrator account."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        if request.data.get("role") == "super_admin" and not getattr(request.user, "is_super_admin", False):
+            return Response(
+                {"detail": "Permission denied: Only Super Administrators can assign the Super Administrator role."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        target_user = self.get_object()
+        if target_user.is_super_admin and not getattr(request.user, "is_super_admin", False):
+            return Response(
+                {"detail": "Permission denied: Only Super Administrators can modify a Super Administrator account."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        if request.data.get("role") == "super_admin" and not getattr(request.user, "is_super_admin", False):
+            return Response(
+                {"detail": "Permission denied: Only Super Administrators can assign the Super Administrator role."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        return super().partial_update(request, *args, **kwargs)
+
     @action(detail=True, methods=["post"], url_path="toggle-status")
     def toggle_status(self, request, pk=None):
         target_user = self.get_object()
+        if target_user.is_super_admin and not getattr(request.user, "is_super_admin", False):
+            return Response(
+                {"detail": "Permission denied: Only Super Administrators can alter account status for a Super Administrator."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        if target_user == request.user and target_user.is_super_admin:
+            return Response(
+                {"detail": "Security violation: Super Administrators cannot suspend their own active credentials."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         target_user.is_active = not target_user.is_active
         target_user.save(update_fields=["is_active"])
         return Response({
@@ -359,6 +452,11 @@ class UserViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="reset-password")
     def reset_password(self, request, pk=None):
         target_user = self.get_object()
+        if target_user.is_super_admin and not getattr(request.user, "is_super_admin", False):
+            return Response(
+                {"detail": "Permission denied: Only Super Administrators can reset credentials for a Super Administrator."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         new_password = request.data.get("new_password") or "TempPass123!"
         target_user.set_password(new_password)
         target_user.save(update_fields=["password"])
@@ -588,10 +686,14 @@ class UserViewSet(viewsets.ModelViewSet):
         """
         Returns the catalog of institutional portal roles with default functions,
         and all granular functional capabilities.
+        Non-superadmins receive only assignable subordinate roles.
         """
         from .constants import PORTAL_ROLES, PORTAL_FUNCTIONS
+        roles = PORTAL_ROLES
+        if not (request.user and getattr(request.user, "is_super_admin", False)):
+            roles = [r for r in PORTAL_ROLES if r["code"] != "super_admin"]
         return Response({
-            "roles": PORTAL_ROLES,
+            "roles": roles,
             "functions": PORTAL_FUNCTIONS,
         }, status=status.HTTP_200_OK)
 
@@ -614,11 +716,32 @@ class UserViewSet(viewsets.ModelViewSet):
         new_role = serializer.validated_data.get("role")
         assigned_functions = serializer.validated_data.get("assigned_functions", [])
 
-        # Prevent a non-superuser from demoting a superuser or themselves if sole admin
-        if target_user.is_superuser and not request.user.is_superuser:
+        # Shield super_admin accounts: only Super Admin can alter a super admin
+        if target_user.is_super_admin and not request.user.is_super_admin:
             return Response(
-                {"detail": "Permission denied: Only database superusers can modify a superuser's role."},
+                {"detail": "Permission denied: Only Super Administrators can modify a Super Administrator's role or capabilities."},
                 status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Prevent privilege escalation: non-superadmin cannot assign super_admin role
+        if new_role == "super_admin" and not request.user.is_super_admin:
+            return Response(
+                {"detail": "Permission denied: Only Super Administrators can grant the Super Administrator role."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Prevent non-superadmin from granting users.manage_roles
+        if "users.manage_roles" in assigned_functions and not request.user.is_super_admin:
+            return Response(
+                {"detail": "Permission denied: Only Super Administrators can grant role management capabilities."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Prevent super admin from demoting themselves
+        if target_user == request.user and target_user.is_super_admin and new_role and new_role != "super_admin":
+            return Response(
+                {"detail": "Security violation: Super Administrators cannot revoke their own Super Administrator role."},
+                status=status.HTTP_400_BAD_REQUEST
             )
 
         old_role = target_user.role
@@ -661,10 +784,24 @@ class UserViewSet(viewsets.ModelViewSet):
         from django.utils import timezone
         from apps.grades.gpa import compute_cumulative_gpa
 
-        role = request.query_params.get("role", "student")
+        role = request.query_params.get("role")
+        user_type = request.query_params.get("user_type")
+        department = request.query_params.get("department")
+
         qs = User.objects.all().order_by("last_name", "first_name")
-        if role and role != "all":
+        if not (request.user and getattr(request.user, "is_super_admin", False)):
+            qs = qs.exclude(role="super_admin").exclude(is_superuser=True)
+
+        if user_type == "student":
+            qs = qs.filter(role="student")
+        elif user_type in ("staff", "faculty"):
+            qs = qs.exclude(role="student")
+        elif role and role != "all":
             qs = qs.filter(role=role)
+
+        if department:
+            from django.db.models import Q
+            qs = qs.filter(Q(department__icontains=department) | Q(profile__major__icontains=department))
 
         search = request.query_params.get("search")
         if search:
@@ -673,14 +810,21 @@ class UserViewSet(viewsets.ModelViewSet):
                 Q(first_name__icontains=search) |
                 Q(last_name__icontains=search) |
                 Q(email__icontains=search) |
-                Q(student_id__icontains=search)
+                Q(student_id__icontains=search) |
+                Q(department__icontains=search)
             )
 
         timestamp_str = timezone.now().strftime("%Y%m%d_%H%M")
         response = HttpResponse(content_type="text/csv; charset=utf-8")
-        filename_prefix = f"{role}_directory" if role and role != "all" else "user_directory"
-        if not role or role == "student":
+        if user_type == "student":
             filename_prefix = "student_directory"
+        elif user_type in ("staff", "faculty"):
+            filename_prefix = "staff_directory"
+        elif role and role != "all":
+            filename_prefix = f"{role}_directory"
+        else:
+            filename_prefix = "user_directory"
+
         response["Content-Disposition"] = f'attachment; filename="{filename_prefix}_{timestamp_str}.csv"'
         response.write("\ufeff")
 

@@ -154,6 +154,16 @@ class IsAdminOrStaff(BasePermission):
         if request.user.is_superuser or request.user.is_staff:
             return True
         norm = normalize_role(request.user.role)
+        if request.method in SAFE_METHODS:
+            return (
+                norm in (
+                    RoleChoice.SUPER_ADMIN,
+                    RoleChoice.ACADEMIC_OFFICER,
+                    RoleChoice.HEAD_OF_DEPARTMENT,
+                    RoleChoice.FINANCE,
+                )
+                or getattr(request.user, "has_portal_permission", lambda f: False)("students.view")
+            )
         return norm in (RoleChoice.SUPER_ADMIN, RoleChoice.ACADEMIC_OFFICER, RoleChoice.HEAD_OF_DEPARTMENT)
 
 

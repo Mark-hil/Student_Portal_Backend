@@ -17,8 +17,10 @@ from .serializers import (
     StudentRegistrationCompletionSerializer, AcademicProgressionLogSerializer,
     PromoteStudentSerializer, DemoteStudentSerializer, WithdrawStudentSerializer,
     ReinstateStudentSerializer, BulkPromoteSerializer, HardDeleteStudentSerializer,
-    AssignRoleAndFunctionsSerializer,
+    AssignRoleAndFunctionsSerializer, AuditLogSerializer,
 )
+from .models import AuditLog
+from .services.audit_service import AuditService
 from .services.roster_service import process_roster_csv, generate_sample_csv_template
 from core.permissions import IsAdminOrStaff
 
@@ -168,6 +170,17 @@ class ChangePasswordView(APIView):
         request.user.set_password(serializer.validated_data["new_password"])
         request.user.save(update_fields=["password"])
         logger.info("Password changed: %s", request.user.email)
+        AuditService.log_event(
+            action="USER_PASSWORD_CHANGED",
+            category=AuditLog.Category.AUTH,
+            actor=request.user,
+            request=request,
+            status=AuditLog.Status.SUCCESS,
+            target_type="User",
+            target_id=str(request.user.id),
+            target_repr=f"{request.user.full_name} ({request.user.email})",
+            description=f"User '{request.user.email}' updated account password.",
+        )
         return Response({"detail": "Password updated successfully."})
 
 
@@ -330,6 +343,18 @@ class UserViewSet(viewsets.ModelViewSet):
         reason = request.data.get("reason") or request.query_params.get("reason") or "Deleted via management console"
         from apps.users.services.progression_service import soft_delete_student
         result = soft_delete_student(target_user, reason=reason, actor=request.user)
+        AuditService.log_event(
+            action="USER_DELETED",
+            category=AuditLog.Category.USER_MANAGEMENT,
+            actor=request.user,
+            request=request,
+            status=AuditLog.Status.SUCCESS,
+            target_type="User",
+            target_id=str(target_user.id),
+            target_repr=f"{target_user.full_name} ({target_user.email})",
+            description=f"User account '{target_user.email}' was archived/soft-deleted. Reason: {reason}",
+            metadata={"reason": reason},
+        )
         return Response(result, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["post"], url_path="upload-moh-roster")
@@ -341,13 +366,13 @@ class UserViewSet(viewsets.ModelViewSet):
         csv_file = request.FILES.get("file") or request.FILES.get("csv_file")
         if not csv_file:
             return Response(
-                {"detail": "No CSV file uploaded. Please select a valid student roster file."},
+                {"detail": "No file uploaded. Please upload a CSV roster or Excel file."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        default_program = request.data.get("default_program")
-        default_class = request.data.get("default_class") or "100"
-        default_year = request.data.get("default_year")
+        default_program = request.data.get("program", "nursing").lower()
+        default_class = request.data.get("class_name", "NAC 26").strip()
+        default_year = int(request.data.get("admission_year", 2026))
         dry_run = str(request.data.get("dry_run", "")).lower() in ("true", "1")
 
         try:
@@ -369,6 +394,23 @@ class UserViewSet(viewsets.ModelViewSet):
                 result["detail"] = first_err
                 return Response(result, status=status.HTTP_400_BAD_REQUEST)
 
+            AuditService.log_event(
+                action="ROSTER_UPLOADED",
+                category=AuditLog.Category.USER_MANAGEMENT,
+                actor=request.user,
+                request=request,
+                status=AuditLog.Status.SUCCESS,
+                target_type="StudentRoster",
+                target_repr=getattr(csv_file, "name", "roster.csv"),
+                description=f"Processed admissions roster '{getattr(csv_file, 'name', 'roster.csv')}': {result.get('imported_count', 0)} new students enrolled, {result.get('updated_count', 0)} updated.",
+                metadata={
+                    "filename": getattr(csv_file, "name", "roster.csv"),
+                    "imported_count": result.get("imported_count", 0),
+                    "updated_count": result.get("updated_count", 0),
+                    "total_rows": result.get("total_rows", 0),
+                    "dry_run": dry_run,
+                },
+            )
             return Response(result, status=status.HTTP_200_OK)
         except Exception as e:
             logger.exception("Failed to process MOH roster: %s", e)
@@ -398,7 +440,21 @@ class UserViewSet(viewsets.ModelViewSet):
                 {"detail": "Permission denied: Only Super Administrators can create Super Administrator accounts."},
                 status=status.HTTP_403_FORBIDDEN
             )
-        return super().create(request, *args, **kwargs)
+        response = super().create(request, *args, **kwargs)
+        if response.status_code == status.HTTP_201_CREATED and "id" in response.data:
+            AuditService.log_event(
+                action="USER_CREATED",
+                category=AuditLog.Category.USER_MANAGEMENT,
+                actor=request.user,
+                request=request,
+                status=AuditLog.Status.SUCCESS,
+                target_type="User",
+                target_id=str(response.data["id"]),
+                target_repr=f"{response.data.get('full_name')} ({response.data.get('email')})",
+                description=f"Created user account '{response.data.get('email')}' with role '{response.data.get('role')}'.",
+                changes={"after": response.data},
+            )
+        return response
 
     def update(self, request, *args, **kwargs):
         target_user = self.get_object()
@@ -412,7 +468,22 @@ class UserViewSet(viewsets.ModelViewSet):
                 {"detail": "Permission denied: Only Super Administrators can assign the Super Administrator role."},
                 status=status.HTTP_403_FORBIDDEN
             )
-        return super().update(request, *args, **kwargs)
+        before_state = {"role": target_user.role, "email": target_user.email, "is_active": target_user.is_active}
+        response = super().update(request, *args, **kwargs)
+        if response.status_code == status.HTTP_200_OK:
+            AuditService.log_event(
+                action="USER_UPDATED",
+                category=AuditLog.Category.USER_MANAGEMENT,
+                actor=request.user,
+                request=request,
+                status=AuditLog.Status.SUCCESS,
+                target_type="User",
+                target_id=str(target_user.id),
+                target_repr=f"{target_user.full_name} ({target_user.email})",
+                description=f"Updated user account '{target_user.email}'.",
+                changes={"before": before_state, "after": response.data},
+            )
+        return response
 
     def partial_update(self, request, *args, **kwargs):
         target_user = self.get_object()
@@ -426,7 +497,22 @@ class UserViewSet(viewsets.ModelViewSet):
                 {"detail": "Permission denied: Only Super Administrators can assign the Super Administrator role."},
                 status=status.HTTP_403_FORBIDDEN
             )
-        return super().partial_update(request, *args, **kwargs)
+        before_state = {"role": target_user.role, "email": target_user.email, "is_active": target_user.is_active}
+        response = super().partial_update(request, *args, **kwargs)
+        if response.status_code == status.HTTP_200_OK:
+            AuditService.log_event(
+                action="USER_UPDATED",
+                category=AuditLog.Category.USER_MANAGEMENT,
+                actor=request.user,
+                request=request,
+                status=AuditLog.Status.SUCCESS,
+                target_type="User",
+                target_id=str(target_user.id),
+                target_repr=f"{target_user.full_name} ({target_user.email})",
+                description=f"Partially updated user account '{target_user.email}'.",
+                changes={"before": before_state, "after": response.data},
+            )
+        return response
 
     @action(detail=True, methods=["post"], url_path="toggle-status")
     def toggle_status(self, request, pk=None):
@@ -443,6 +529,19 @@ class UserViewSet(viewsets.ModelViewSet):
             )
         target_user.is_active = not target_user.is_active
         target_user.save(update_fields=["is_active"])
+        new_status = "active" if target_user.is_active else "suspended"
+        AuditService.log_event(
+            action="USER_STATUS_TOGGLED",
+            category=AuditLog.Category.USER_MANAGEMENT,
+            actor=request.user,
+            request=request,
+            status=AuditLog.Status.SUCCESS,
+            target_type="User",
+            target_id=str(target_user.id),
+            target_repr=f"{target_user.full_name} ({target_user.email})",
+            description=f"Changed account status for '{target_user.email}' to {new_status}.",
+            changes={"is_active": target_user.is_active},
+        )
         return Response({
             "status": "success",
             "is_active": target_user.is_active,
@@ -460,6 +559,17 @@ class UserViewSet(viewsets.ModelViewSet):
         new_password = request.data.get("new_password") or "TempPass123!"
         target_user.set_password(new_password)
         target_user.save(update_fields=["password"])
+        AuditService.log_event(
+            action="USER_PASSWORD_RESET",
+            category=AuditLog.Category.SECURITY,
+            actor=request.user,
+            request=request,
+            status=AuditLog.Status.SUCCESS,
+            target_type="User",
+            target_id=str(target_user.id),
+            target_repr=f"{target_user.full_name} ({target_user.email})",
+            description=f"Administrative password reset performed for '{target_user.email}' by {request.user.email}.",
+        )
         return Response({"status": "success", "detail": f"Password reset successfully for {target_user.email}."})
 
     @action(detail=True, methods=["post"], url_path="resend-credentials")
@@ -770,6 +880,23 @@ class UserViewSet(viewsets.ModelViewSet):
             }
         )
 
+        AuditService.log_event(
+            action="USER_ROLE_ASSIGNED",
+            category=AuditLog.Category.USER_MANAGEMENT,
+            actor=request.user,
+            request=request,
+            status=AuditLog.Status.SUCCESS,
+            target_type="User",
+            target_id=str(target_user.id),
+            target_repr=f"{target_user.full_name} ({target_user.email})",
+            description=f"Assigned role '{target_user.role}' with {len(assigned_functions)} capabilities to '{target_user.email}'.",
+            changes={
+                "before": {"role": old_role},
+                "after": {"role": target_user.role, "assigned_functions": assigned_functions},
+            },
+            metadata={"assigned_functions": assigned_functions},
+        )
+
         return Response({
             "status": "success",
             "message": f"Successfully updated role and capabilities for {target_user.full_name or target_user.email}.",
@@ -819,13 +946,10 @@ class UserViewSet(viewsets.ModelViewSet):
         if user_type == "student":
             filename_prefix = "student_directory"
         elif user_type in ("staff", "faculty"):
-            filename_prefix = "staff_directory"
-        elif role and role != "all":
-            filename_prefix = f"{role}_directory"
+            filename_prefix = "faculty_directory"
         else:
-            filename_prefix = "user_directory"
-
-        response["Content-Disposition"] = f'attachment; filename="{filename_prefix}_{timestamp_str}.csv"'
+            filename_prefix = "users_directory"
+        response["Content-Disposition"] = f'attachment; filename="asdam_{filename_prefix}_{timestamp_str}.csv"'
         response.write("\ufeff")
 
         writer = csv.writer(response)
@@ -890,6 +1014,17 @@ class UserViewSet(viewsets.ModelViewSet):
                 u.created_at.strftime("%Y-%m-%d") if u.created_at else "",
             ])
 
+        AuditService.log_event(
+            action="ROSTER_EXPORTED",
+            category=AuditLog.Category.USER_MANAGEMENT,
+            actor=request.user,
+            request=request,
+            status=AuditLog.Status.SUCCESS,
+            target_type="StudentRoster",
+            target_repr=f"Export ({qs.count()} records)",
+            description=f"Exported {qs.count()} user records to CSV.",
+            metadata={"count": qs.count(), "user_type": user_type, "role": role},
+        )
         return response
 
 
@@ -911,3 +1046,169 @@ class SystemStatsView(APIView):
             "total_courses": courses,
             "pending_batches": pending_batches,
         })
+
+
+class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Super-Admin and Auditor API for inspecting immutable activity and security audit logs.
+    Supports granular filtering, search, metrics calculation, and CSV compliance export.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = AuditLogSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        is_super = getattr(user, "is_super_admin", False) or getattr(user, "is_superuser", False)
+        has_perm = is_super or "audit.view_logs" in getattr(user, "effective_functions", [])
+        if not has_perm:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Access restricted: You do not have permission to inspect system audit logs.")
+
+        qs = AuditLog.objects.select_related("actor").all().order_by("-timestamp")
+
+        category = self.request.query_params.get("category")
+        if category and category != "all":
+            qs = qs.filter(action_category=category)
+
+        status_val = self.request.query_params.get("status")
+        if status_val and status_val != "all":
+            qs = qs.filter(status=status_val)
+
+        action_val = self.request.query_params.get("action")
+        if action_val:
+            qs = qs.filter(action=action_val)
+
+        actor_id = self.request.query_params.get("actor")
+        if actor_id:
+            qs = qs.filter(actor_id=actor_id)
+
+        start_date = self.request.query_params.get("start_date")
+        if start_date:
+            qs = qs.filter(timestamp__gte=start_date)
+
+        end_date = self.request.query_params.get("end_date")
+        if end_date:
+            qs = qs.filter(timestamp__lte=end_date)
+
+        search = self.request.query_params.get("search")
+        if search:
+            from django.db.models import Q
+            qs = qs.filter(
+                Q(actor_email__icontains=search) |
+                Q(target_repr__icontains=search) |
+                Q(description__icontains=search) |
+                Q(ip_address__icontains=search) |
+                Q(action__icontains=search)
+            )
+
+        return qs
+
+    @action(detail=False, methods=["get"], url_path="stats")
+    def stats(self, request):
+        """Executive KPI metrics on system audit events and security posture."""
+        user = request.user
+        is_super = getattr(user, "is_super_admin", False) or getattr(user, "is_superuser", False)
+        has_perm = is_super or "audit.view_logs" in getattr(user, "effective_functions", [])
+        if not has_perm:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Access restricted.")
+
+        from django.utils import timezone
+        from datetime import timedelta
+        from django.db.models import Count
+
+        now = timezone.now()
+        yesterday = now - timedelta(hours=24)
+        week_ago = now - timedelta(days=7)
+
+        total_events = AuditLog.objects.count()
+        failed_logins_24h = AuditLog.objects.filter(
+            action__in=["AUTH_LOGIN_FAILED", "AUTH_LOGIN_BLOCKED"],
+            timestamp__gte=yesterday
+        ).count()
+        admin_actions_7d = AuditLog.objects.filter(
+            action_category__in=[AuditLog.Category.USER_MANAGEMENT, AuditLog.Category.SECURITY],
+            timestamp__gte=week_ago
+        ).count()
+        security_alerts = AuditLog.objects.filter(
+            status__in=[AuditLog.Status.FAILURE, AuditLog.Status.WARNING],
+            timestamp__gte=week_ago
+        ).count()
+
+        category_counts = dict(
+            AuditLog.objects.values("action_category")
+            .annotate(count=Count("id"))
+            .values_list("action_category", "count")
+        )
+
+        recent_actors = list(
+            AuditLog.objects.exclude(actor_email="Anonymous")
+            .values("actor_email", "actor_role")
+            .annotate(event_count=Count("id"))
+            .order_by("-event_count")[:5]
+        )
+
+        return Response({
+            "total_events": total_events,
+            "failed_logins_24h": failed_logins_24h,
+            "admin_actions_7d": admin_actions_7d,
+            "security_alerts_7d": security_alerts,
+            "category_counts": category_counts,
+            "recent_actors": recent_actors,
+        })
+
+    @action(detail=False, methods=["get"], url_path="export-csv")
+    def export_csv(self, request):
+        """Stream formal CSV export of audit logs for external audit & compliance."""
+        import csv
+        from django.http import HttpResponse
+        from django.utils import timezone
+
+        qs = self.get_queryset()[:2000]
+        response = HttpResponse(content_type="text/csv; charset=utf-8")
+        timestamp_str = timezone.now().strftime("%Y%m%d_%H%M%S")
+        response["Content-Disposition"] = f'attachment; filename="system_audit_logs_{timestamp_str}.csv"'
+
+        writer = csv.writer(response)
+        writer.writerow([
+            "Timestamp (UTC)",
+            "Category",
+            "Action",
+            "Status",
+            "Actor Email",
+            "Actor Role",
+            "Target Type",
+            "Target ID",
+            "Target Identifier / Repr",
+            "Description",
+            "IP Address",
+            "User Agent",
+        ])
+
+        for log in qs:
+            writer.writerow([
+                log.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                log.get_action_category_display(),
+                log.action,
+                log.status.upper(),
+                log.actor_email,
+                log.actor_role,
+                log.target_type,
+                log.target_id,
+                log.target_repr,
+                log.description,
+                log.ip_address or "",
+                log.user_agent or "",
+            ])
+
+        AuditService.log_event(
+            action="AUDIT_LOGS_EXPORTED",
+            category=AuditLog.Category.SECURITY,
+            actor=request.user,
+            request=request,
+            status=AuditLog.Status.SUCCESS,
+            target_type="AuditLog",
+            target_repr=f"Exported {qs.count()} audit records",
+            description=f"Auditor '{request.user.email}' exported {qs.count()} audit trail records to CSV.",
+        )
+        return response

@@ -3,7 +3,8 @@ from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
-from .models import UserProfile, AcademicProgressionLog
+from .models import UserProfile, AcademicProgressionLog, AuditLog
+from .services.audit_service import AuditService
 import logging
 
 logger = logging.getLogger(__name__)
@@ -241,6 +242,7 @@ class MOHRegisterSerializer(serializers.Serializer):
     moh_pin = serializers.CharField(required=True)
     serial_number = serializers.CharField(required=True)
     password = serializers.CharField(write_only=True, min_length=8)
+    confirm_password = serializers.CharField(write_only=True, required=False, allow_blank=True)
     email = serializers.EmailField(required=False, allow_blank=True)
     phone = serializers.CharField(required=False, allow_blank=True)
 
@@ -252,6 +254,10 @@ class MOHRegisterSerializer(serializers.Serializer):
         pin = str(attrs.get("moh_pin", "")).strip().upper()
         serial = str(attrs.get("serial_number", "")).strip()
         email = str(attrs.get("email", "")).strip().lower()
+
+        confirm_pwd = attrs.get("confirm_password")
+        if confirm_pwd is not None and attrs.get("password") != confirm_pwd:
+            raise serializers.ValidationError({"confirm_password": "Passwords do not match. Please ensure both passwords match."})
 
         user = User.objects.filter(moh_pin__iexact=pin).first()
         if not user:
@@ -320,7 +326,19 @@ class MultiIdentifierTokenObtainPairSerializer(TokenObtainPairSerializer):
             Q(moh_pin__iexact=identifier_clean)
         ).first()
 
+        request = self.context.get("request")
         if not user:
+            AuditService.log_event(
+                action="AUTH_LOGIN_FAILED",
+                category=AuditLog.Category.AUTH,
+                status=AuditLog.Status.FAILURE,
+                actor_email=identifier_clean,
+                request=request,
+                target_type="User",
+                target_repr=identifier_clean,
+                description=f"Authentication failed: No active account matching identifier '{identifier_clean}'.",
+                metadata={"identifier": identifier_clean},
+            )
             raise serializers.ValidationError({"detail": "No active account found matching the provided credentials."})
 
         is_valid = user.check_password(password)
@@ -329,10 +347,48 @@ class MultiIdentifierTokenObtainPairSerializer(TokenObtainPairSerializer):
             is_valid = True
 
         if not is_valid:
+            AuditService.log_event(
+                action="AUTH_LOGIN_FAILED",
+                category=AuditLog.Category.AUTH,
+                status=AuditLog.Status.FAILURE,
+                actor=user,
+                request=request,
+                target_type="User",
+                target_id=str(user.id),
+                target_repr=f"{user.full_name} ({user.email})",
+                description=f"Authentication failed: Invalid credentials for user '{user.email}'.",
+                metadata={"identifier": identifier_clean},
+            )
             raise serializers.ValidationError({"detail": "Invalid password or credentials."})
 
         if not user.is_active:
+            AuditService.log_event(
+                action="AUTH_LOGIN_BLOCKED",
+                category=AuditLog.Category.SECURITY,
+                status=AuditLog.Status.WARNING,
+                actor=user,
+                request=request,
+                target_type="User",
+                target_id=str(user.id),
+                target_repr=f"{user.full_name} ({user.email})",
+                description=f"Security alert: Login attempt on suspended or inactive account '{user.email}'.",
+                metadata={"identifier": identifier_clean},
+            )
             raise serializers.ValidationError({"detail": "This account is inactive or suspended. Please contact the academic office."})
+
+        # Success audit event
+        AuditService.log_event(
+            action="AUTH_LOGIN_SUCCESS",
+            category=AuditLog.Category.AUTH,
+            status=AuditLog.Status.SUCCESS,
+            actor=user,
+            request=request,
+            target_type="User",
+            target_id=str(user.id),
+            target_repr=f"{user.full_name} ({user.email})",
+            description=f"User '{user.full_name}' logged in successfully via identifier '{identifier_clean}'.",
+            metadata={"identifier": identifier_clean},
+        )
 
         refresh = self.get_token(user)
         return {
@@ -376,6 +432,7 @@ class StudentRegistrationCompletionSerializer(serializers.Serializer):
 
     # Permanent Password Setup
     new_password = serializers.CharField(write_only=True, required=False, allow_blank=True, min_length=8)
+    confirm_password = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     def validate_ghana_card(self, value):
         cleaned = str(value).strip().upper()
@@ -387,6 +444,16 @@ class StudentRegistrationCompletionSerializer(serializers.Serializer):
         if value:
             validate_password(value)
         return value
+
+    def validate(self, attrs):
+        new_pwd = attrs.get("new_password")
+        confirm_pwd = attrs.get("confirm_password")
+        if new_pwd or confirm_pwd:
+            if not new_pwd or len(new_pwd) < 8:
+                raise serializers.ValidationError({"new_password": "New permanent password must be at least 8 characters long."})
+            if confirm_pwd is not None and new_pwd != confirm_pwd:
+                raise serializers.ValidationError({"confirm_password": "Passwords do not match. Please ensure both passwords match."})
+        return attrs
 
     def save(self, user):
         from django.utils import timezone
@@ -527,6 +594,53 @@ class AssignRoleAndFunctionsSerializer(serializers.Serializer):
         if invalid:
             raise serializers.ValidationError(f"Invalid capability codes: {invalid}")
         return value
+
+
+class AuditLogSerializer(serializers.ModelSerializer):
+    actor_name = serializers.SerializerMethodField()
+    actor_avatar = serializers.SerializerMethodField()
+    category_display = serializers.CharField(source="get_action_category_display", read_only=True)
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+
+    class Meta:
+        model = AuditLog
+        fields = [
+            "id",
+            "timestamp",
+            "actor",
+            "actor_name",
+            "actor_email",
+            "actor_role",
+            "actor_avatar",
+            "ip_address",
+            "user_agent",
+            "action",
+            "action_category",
+            "category_display",
+            "status",
+            "status_display",
+            "target_type",
+            "target_id",
+            "target_repr",
+            "description",
+            "changes",
+            "metadata",
+        ]
+        read_only_fields = fields
+
+    def get_actor_name(self, obj):
+        if obj.actor:
+            return obj.actor.full_name
+        return obj.actor_email or "System / Anonymous"
+
+    def get_actor_avatar(self, obj):
+        if obj.actor and getattr(obj.actor, "avatar", None):
+            request = self.context.get("request")
+            try:
+                return request.build_absolute_uri(obj.actor.avatar.url) if request else obj.actor.avatar.url
+            except Exception:
+                return str(obj.actor.avatar)
+        return None
 
 
 

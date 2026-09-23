@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from .models import User, UserProfile
+from .models import User, UserProfile, AuditLog
 
 
 class UserProfileInline(admin.StackedInline):
@@ -31,3 +31,26 @@ class UserAdmin(BaseUserAdmin):
             "fields": ("email", "first_name", "last_name", "role", "password1", "password2"),
         }),
     )
+
+
+@admin.register(AuditLog)
+class AuditLogAdmin(admin.ModelAdmin):
+    list_display = ["timestamp", "action", "action_category", "status", "actor_email", "target_repr", "ip_address"]
+    list_filter = ["action_category", "status", "action"]
+    search_fields = ["actor_email", "target_repr", "description", "ip_address"]
+    ordering = ["-timestamp"]
+    readonly_fields = [
+        "id", "timestamp", "actor", "actor_email", "actor_role", "ip_address", "user_agent",
+        "action", "action_category", "status", "target_type", "target_id", "target_repr",
+        "description", "changes", "metadata"
+    ]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+

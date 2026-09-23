@@ -2,11 +2,12 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from apps.users.views import (
     MeView, ChangePasswordView, UserViewSet, SystemStatsView,
-    AvatarUploadView, CompleteRegistrationView
+    AvatarUploadView, CompleteRegistrationView, AuditLogViewSet
 )
 
 router = DefaultRouter()
 router.register("manage", UserViewSet, basename="manage-users")
+router.register("audit-logs", AuditLogViewSet, basename="audit-logs")
 
 urlpatterns = [
     path("me/",                          MeView.as_view(),                   name="me"),

@@ -53,7 +53,7 @@ class TestRegistrationOnboardingFlow:
         from django.core import mail
         captured_sms = []
 
-        def mock_send_sms(phone, message, sender_id="ASDAM"):
+        def mock_send_sms(phone, message, sender_id="ASDAM", *args, **kwargs):
             captured_sms.append({"phone": phone, "message": message, "sender_id": sender_id})
             return {"success": True, "phone": phone, "provider": "Arkesel (Test Mock)"}
 
@@ -83,7 +83,7 @@ class TestRegistrationOnboardingFlow:
         assert "MOH-SERIAL-999" in sent_email.body
 
     def test_roster_import_dispatches_notifications(self, monkeypatch):
-        def mock_send_sms(phone, message, sender_id="ASDAM"):
+        def mock_send_sms(phone, message, sender_id="ASDAM", *args, **kwargs):
             return {"success": True, "phone": phone, "provider": "Mock"}
         monkeypatch.setattr("apps.notifications.sms.send_sms", mock_send_sms)
 
@@ -148,3 +148,33 @@ class TestRegistrationOnboardingFlow:
         resp = client.post(f"/api/v1/users/manage/{student_unregistered.id}/resend-credentials/")
         assert resp.status_code == 200
         assert resp.data["status"] == "success"
+
+    def test_registration_fails_if_password_confirmation_does_not_match(self, student_unregistered):
+        client = APIClient()
+        client.force_authenticate(user=student_unregistered)
+
+        payload = {
+            "first_name": "Ama",
+            "last_name": "Mensah",
+            "ghana_card": "GHA-726189102-4",
+            "gender": "Female",
+            "date_of_birth": "2004-05-12",
+            "birth_place": "Kumasi",
+            "residential_address": "House No. 12, Bantama",
+            "city": "Kumasi",
+            "region": "Ashanti",
+            "district": "Kumasi Metropolitan",
+            "digital_address": "AK-039-5028",
+            "phone": "0241234567",
+            "guardian_name": "Kwame Mensah",
+            "guardian_phone": "0209876543",
+            "new_password": "NewPermanentPass123!",
+            "confirm_password": "DifferentPass999!",
+        }
+
+        resp = client.post("/api/v1/users/me/complete-registration/", data=payload, format="json")
+        assert resp.status_code == 400
+        errors = resp.data.get("errors", resp.data)
+        assert "confirm_password" in errors
+        assert "Passwords do not match" in str(errors["confirm_password"])
+

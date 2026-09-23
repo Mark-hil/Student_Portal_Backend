@@ -193,6 +193,27 @@ class TestMOHRosterUploadAndAuth:
         })
         assert login_email.status_code == 200
 
+    def test_moh_registration_fails_if_password_confirmation_does_not_match(self):
+        csv_content = (
+            "first_name,last_name,moh_pin,serial_number,program,class,year\n"
+            "Grace,Donkor,MOH-NUR-999,SN-9999,Nursing,Level 100,2026\n"
+        )
+        process_roster_csv(csv_content)
+
+        client = APIClient()
+        reg_res = client.post("/api/v1/auth/register-moh/", {
+            "moh_pin": "MOH-NUR-999",
+            "serial_number": "SN-9999",
+            "password": "InitialPassword123!",
+            "confirm_password": "DifferentPassword123!",
+            "email": "grace.donkor@example.com",
+            "phone": "0240009999"
+        })
+        assert reg_res.status_code == 400
+        errors = reg_res.data.get("errors", reg_res.data)
+        assert "confirm_password" in errors
+        assert "Passwords do not match" in str(errors["confirm_password"])
+
     def test_direct_initial_login_with_serial_number(self):
         # Pre-seed student who hasn't completed activation form yet
         csv_content = (

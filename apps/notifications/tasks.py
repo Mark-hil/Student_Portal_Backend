@@ -95,7 +95,14 @@ def dispatch_welcome_notifications(user_id: str, raw_password: str):
     sms_result = {"success": False}
     if user.phone:
         try:
-            sms_result = send_sms(phone=user.phone, message=sms_text, sender_id="ASDAM")
+            sms_result = send_sms(
+                phone=user.phone,
+                message=sms_text,
+                sender_id="ASDAM",
+                recipient_name=full_name,
+                user=user,
+                purpose="fresher_credentials",
+            )
         except Exception as e:
             logger.error("SMS dispatch error for user %s: %s", user.email, e)
 
@@ -273,7 +280,14 @@ def dispatch_registration_confirmation(user_id: str):
                 f"ASDAM: Congratulations {user.first_name}! Your student registration is complete. "
                 f"Full portal access is now unlocked for Student ID {student_id}."
             )
-            send_sms(phone=user.phone, message=sms_text)
+            send_sms(
+                phone=user.phone,
+                message=sms_text,
+                sender_id="ASDAM",
+                recipient_name=full_name,
+                user=user,
+                purpose="registration_completed",
+            )
         except Exception as e:
             logger.warning("Registration confirmed SMS failed: %s", e)
 

@@ -289,3 +289,87 @@ class AcademicProgressionLog(models.Model):
     def __str__(self):
         return f"{self.action} for {self.student.email}: {self.from_level} -> {self.to_level} at {self.created_at}"
 
+
+class AuditLog(models.Model):
+    """
+    Immutable, append-only security and operational audit trail for institutional compliance.
+    Records all authentication events, administrative actions, role assignments,
+    and sensitive data modifications with actor snapshots and change diffs.
+    """
+    class Category(models.TextChoices):
+        AUTH = "auth", "Authentication & Session"
+        USER_MANAGEMENT = "user_management", "User & Access Management"
+        ACADEMICS = "academics", "Academics & Grading"
+        FINANCIALS = "financials", "Financials & Billing"
+        SECURITY = "security", "Security & System Shielding"
+        SYSTEM = "system", "System & Data Maintenance"
+
+    class Status(models.TextChoices):
+        SUCCESS = "success", "Success"
+        FAILURE = "failure", "Failure"
+        WARNING = "warning", "Warning"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    timestamp = models.DateTimeField(default=timezone.now, db_index=True)
+
+    # Actor attribution (with immutable historical snapshot in case user is deleted or altered)
+    actor = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="audit_logs"
+    )
+    actor_email = models.CharField(max_length=255, blank=True, db_index=True)
+    actor_role = models.CharField(max_length=50, blank=True, db_index=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True)
+
+    # Action taxonomy
+    action = models.CharField(max_length=100, db_index=True)
+    action_category = models.CharField(
+        max_length=40,
+        choices=Category.choices,
+        default=Category.SYSTEM,
+        db_index=True
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.SUCCESS,
+        db_index=True
+    )
+
+    # Target entity
+    target_type = models.CharField(max_length=100, blank=True, db_index=True)
+    target_id = models.CharField(max_length=100, blank=True, db_index=True)
+    target_repr = models.CharField(max_length=255, blank=True)
+
+    # Audit narrative and structured diff
+    description = models.TextField(blank=True)
+    changes = models.JSONField(default=dict, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = "audit_logs"
+        ordering = ["-timestamp"]
+        indexes = [
+            models.Index(fields=["timestamp", "action_category"]),
+            models.Index(fields=["actor_email", "timestamp"]),
+            models.Index(fields=["action", "status"]),
+            models.Index(fields=["target_type", "target_id"]),
+        ]
+
+    def __str__(self):
+        return f"[{self.timestamp.strftime('%Y-%m-%d %H:%M:%S')}] {self.actor_email or 'Anonymous'} -> {self.action} ({self.status})"
+
+    def save(self, *args, **kwargs):
+        # Strict immutability guarantee: once written to the DB, records can NEVER be modified
+        if not self._state.adding and self.pk and AuditLog.objects.filter(pk=self.pk).exists():
+            raise RuntimeError("AuditLog records are immutable and cannot be updated.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        # Strict immutability guarantee: audit records can NEVER be deleted
+        raise RuntimeError("AuditLog records are permanent and cannot be deleted.")
+

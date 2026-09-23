@@ -305,6 +305,21 @@ class GradeBatchViewSet(
         batch = self.get_object()
         try:
             batch.approve(request.user)
+            from apps.users.models import AuditLog
+            from apps.users.services.audit_service import AuditService
+            course_code = getattr(getattr(batch, "course", None), "code", "Unknown")
+            AuditService.log_event(
+                action="GRADE_BATCH_APPROVED",
+                category=AuditLog.Category.ACADEMICS,
+                actor=request.user,
+                request=request,
+                status=AuditLog.Status.SUCCESS,
+                target_type="GradeBatch",
+                target_id=str(batch.id),
+                target_repr=f"Grade Batch {batch.id} ({course_code})",
+                description=f"Academic Officer '{request.user.email}' approved grade batch for {course_code} ({batch.academic_year} Sem {batch.semester}).",
+                metadata={"batch_id": str(batch.id), "course": course_code},
+            )
         except ValueError as e:
             return Response({"error": "invalid_status", "detail": str(e)}, status=400)
         logger.info("Batch %s approved by %s", pk, request.user.email)
@@ -333,6 +348,21 @@ class GradeBatchViewSet(
         batch = self.get_object()
         try:
             batch.publish(request.user)
+            from apps.users.models import AuditLog
+            from apps.users.services.audit_service import AuditService
+            course_code = getattr(getattr(batch, "course", None), "code", "Unknown")
+            AuditService.log_event(
+                action="GRADE_BATCH_PUBLISHED",
+                category=AuditLog.Category.ACADEMICS,
+                actor=request.user,
+                request=request,
+                status=AuditLog.Status.SUCCESS,
+                target_type="GradeBatch",
+                target_id=str(batch.id),
+                target_repr=f"Grade Batch {batch.id} ({course_code})",
+                description=f"Academic Officer '{request.user.email}' officially published grades for {course_code} to student transcripts.",
+                metadata={"batch_id": str(batch.id), "course": course_code},
+            )
         except ValueError as e:
             return Response({"error": "invalid_status", "detail": str(e)}, status=400)
         logger.info("Batch %s published by %s — students notified", pk, request.user.email)

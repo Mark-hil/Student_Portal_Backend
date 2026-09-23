@@ -109,6 +109,7 @@ jobs:
         with:
           name: coverage-users
           path: .coverage.users
+          include-hidden-files: true
           retention-days: 1
 
   test-academics:
@@ -144,6 +145,7 @@ jobs:
         with:
           name: coverage-academics
           path: .coverage.academics
+          include-hidden-files: true
           retention-days: 1
 
   test-financials:
@@ -179,6 +181,7 @@ jobs:
         with:
           name: coverage-financials
           path: .coverage.financials
+          include-hidden-files: true
           retention-days: 1
 
   # ─────────────────────────────────────────────────────────────
@@ -204,24 +207,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install coverage[toml]
 
-      - name: Download Users Coverage Data
+      - name: Download All Coverage Data
         uses: actions/download-artifact@v4
         with:
-          name: coverage-users
-
-      - name: Download Academics Coverage Data
-        uses: actions/download-artifact@v4
-        with:
-          name: coverage-academics
-
-      - name: Download Financials Coverage Data
-        uses: actions/download-artifact@v4
-        with:
-          name: coverage-financials
+          pattern: coverage-*
+          merge-multiple: true
 
       - name: Combine Coverage Data
         run: |
-          coverage combine .coverage.*
+          ls -la .coverage*
+          coverage combine
 
       - name: Publish Markdown Summary Table to Job Summary
         run: |

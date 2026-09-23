@@ -643,4 +643,47 @@ class AuditLogSerializer(serializers.ModelSerializer):
         return None
 
 
+class PasswordResetRequestSerializer(serializers.Serializer):
+    identifier = serializers.CharField(required=True, help_text="Email, Student ID, Phone Number, or MOH PIN")
+    channel = serializers.ChoiceField(choices=["sms", "email", "both"], required=False, default="sms")
+
+    def validate_identifier(self, value):
+        val = value.strip()
+        if not val:
+            raise serializers.ValidationError("Identifier cannot be empty.")
+        return val
+
+
+class PasswordResetVerifySerializer(serializers.Serializer):
+    identifier = serializers.CharField(required=True)
+    code = serializers.CharField(required=True, min_length=6, max_length=6)
+
+    def validate_code(self, value):
+        val = value.strip()
+        if not val.isdigit() or len(val) != 6:
+            raise serializers.ValidationError("Verification code must be exactly 6 digits.")
+        return val
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    identifier = serializers.CharField(required=True)
+    code = serializers.CharField(required=True, min_length=6, max_length=6)
+    new_password = serializers.CharField(required=True, min_length=8, write_only=True)
+    confirm_password = serializers.CharField(required=True, min_length=8, write_only=True)
+
+    def validate_code(self, value):
+        val = value.strip()
+        if not val.isdigit() or len(val) != 6:
+            raise serializers.ValidationError("Verification code must be exactly 6 digits.")
+        return val
+
+    def validate(self, attrs):
+        new_password = attrs.get("new_password")
+        confirm_password = attrs.get("confirm_password")
+        if new_password != confirm_password:
+            raise serializers.ValidationError({"confirm_password": "Passwords do not match. Please ensure both passwords match."})
+        return attrs
+
+
+
 

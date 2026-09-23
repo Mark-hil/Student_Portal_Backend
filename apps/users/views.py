@@ -18,14 +18,50 @@ from .serializers import (
     PromoteStudentSerializer, DemoteStudentSerializer, WithdrawStudentSerializer,
     ReinstateStudentSerializer, BulkPromoteSerializer, HardDeleteStudentSerializer,
     AssignRoleAndFunctionsSerializer, AuditLogSerializer,
+    PasswordResetRequestSerializer, PasswordResetVerifySerializer, PasswordResetConfirmSerializer,
 )
-from .models import AuditLog
+import hashlib
+import secrets
+from datetime import timedelta
+from django.utils import timezone
+from django.conf import settings
+from django.core.mail import send_mail
+from django.db.models import Q
+from apps.notifications.sms import send_sms
+from .models import AuditLog, PasswordResetToken
 from .services.audit_service import AuditService
 from .services.roster_service import process_roster_csv, generate_sample_csv_template
 from core.permissions import IsAdminOrStaff
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
+
+
+def _hash_otp(code: str) -> str:
+    return hashlib.sha256(code.strip().encode("utf-8")).hexdigest()
+
+
+def _mask_destination(dest: str, channel: str) -> str:
+    if channel == "email" or "@" in dest:
+        parts = dest.split("@")
+        name = parts[0]
+        domain = parts[1] if len(parts) > 1 else ""
+        masked_name = name[0] + "••••" + (name[-1] if len(name) > 1 else "")
+        return f"{masked_name}@{domain}"
+    else:
+        if len(dest) >= 7:
+            return dest[:3] + "••••" + dest[-3:]
+        return dest[:2] + "••••"
+
+
+def _find_user_by_identifier(identifier: str):
+    identifier = identifier.strip()
+    return User.objects.filter(
+        Q(email__iexact=identifier) |
+        Q(student_id__iexact=identifier) |
+        Q(phone=identifier) |
+        Q(moh_pin__iexact=identifier)
+    ).first()
 
 
 class CustomTokenObtainPairView(TokenObtainPairView):
@@ -86,6 +122,280 @@ class RegisterMOHView(APIView):
                 "access": str(refresh.access_token),
                 "refresh": str(refresh),
             },
+        }, status=status.HTTP_200_OK)
+
+
+class PasswordResetRequestView(APIView):
+    """
+    POST /api/v1/auth/password-reset/request/
+    Initiate self-service password reset.
+    Finds account by Student ID, Email, Phone, or MOH PIN, generates 6-digit OTP,
+    hashes it, stores it, and dispatches via SMS (Arkesel v2) or Email.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        identifier = serializer.validated_data["identifier"]
+        channel = serializer.validated_data.get("channel", "sms")
+
+        user = _find_user_by_identifier(identifier)
+        if not user:
+            return Response({
+                "error": "not_found",
+                "detail": "No active account found matching the provided identifier."
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        if not user.is_active:
+            return Response({
+                "error": "account_inactive",
+                "detail": "This account is inactive. Please contact the ASDAM portal administrator."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Rate limiting: max 5 requests in 15 minutes
+        recent_cutoff = timezone.now() - timedelta(minutes=15)
+        recent_requests = PasswordResetToken.objects.filter(
+            user=user,
+            created_at__gte=recent_cutoff
+        ).count()
+        if recent_requests >= 5:
+            return Response({
+                "error": "rate_limited",
+                "detail": "Too many password reset requests. Please wait 15 minutes before requesting again."
+            }, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        # Determine destination
+        if channel == "sms":
+            if not user.phone:
+                channel = "email"
+                destination = user.email
+            else:
+                destination = user.phone
+        else:
+            channel = "email"
+            destination = user.email
+
+        # Invalidate any previously unexpired unused tokens
+        PasswordResetToken.objects.filter(user=user, is_used=False).update(is_used=True)
+
+        # Generate 6-digit code
+        raw_code = f"{secrets.randbelow(900000) + 100000}"
+        token_hash = _hash_otp(raw_code)
+        expires_at = timezone.now() + timedelta(minutes=15)
+
+        client_ip = request.META.get("HTTP_X_FORWARDED_FOR")
+        if client_ip:
+            client_ip = client_ip.split(",")[0].strip()
+        else:
+            client_ip = request.META.get("REMOTE_ADDR")
+
+        PasswordResetToken.objects.create(
+            user=user,
+            token_hash=token_hash,
+            channel=channel,
+            destination=destination,
+            expires_at=expires_at,
+            ip_address=client_ip,
+        )
+
+        # Dispatch message
+        if channel == "sms":
+            sms_text = f"Your ASDAM Student Portal password reset code is: {raw_code}. Valid for 15 minutes. Do not share this code."
+            try:
+                send_sms(
+                    phone=destination,
+                    message=sms_text,
+                    sender_id="ASDAM",
+                    purpose="password_reset",
+                    recipient_name=user.full_name
+                )
+            except Exception as e:
+                logger.error("Failed to dispatch password reset SMS to %s: %s", destination, e)
+        else:
+            email_body = (
+                f"Dear {user.first_name},\n\n"
+                f"We received a request to reset your ASDAM Student Portal password.\n\n"
+                f"Your 6-digit password reset code is:\n\n"
+                f"   {raw_code}\n\n"
+                f"This code will expire in 15 minutes.\n"
+                f"If you did not request a password reset, please contact the ASDAM ICT Directorate immediately.\n\n"
+                f"Best regards,\n"
+                f"ASDAM ICT Directorate"
+            )
+            try:
+                send_mail(
+                    subject="ASDAM Portal — Password Reset Verification Code",
+                    message=email_body,
+                    from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@asdam.edu.gh"),
+                    recipient_list=[destination],
+                    fail_silently=False,
+                )
+            except Exception as e:
+                logger.error("Failed to send password reset email to %s: %s", destination, e)
+
+        logger.info("Password reset code generated and dispatched for %s via %s", user.email, channel)
+        return Response({
+            "status": "success",
+            "message": f"Password reset verification code has been sent via {channel.upper()}.",
+            "channel": channel,
+            "masked_destination": _mask_destination(destination, channel),
+        }, status=status.HTTP_200_OK)
+
+
+class PasswordResetVerifyView(APIView):
+    """
+    POST /api/v1/auth/password-reset/verify/
+    Verify that the 6-digit code is valid and unexpired before asking user for new passwords.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = PasswordResetVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        identifier = serializer.validated_data["identifier"]
+        code = serializer.validated_data["code"]
+
+        user = _find_user_by_identifier(identifier)
+        if not user:
+            return Response({"error": "not_found", "detail": "Account not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        reset_token = PasswordResetToken.objects.filter(
+            user=user,
+            is_used=False,
+            expires_at__gt=timezone.now(),
+        ).order_by("-created_at").first()
+
+        if not reset_token:
+            return Response({
+                "error": "expired",
+                "detail": "Verification code has expired or was not requested. Please request a new code."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if reset_token.is_locked:
+            return Response({
+                "error": "locked",
+                "detail": "Maximum verification attempts exceeded. Please request a new code."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        code_hash = _hash_otp(code)
+        if reset_token.token_hash != code_hash:
+            reset_token.attempts += 1
+            reset_token.save(update_fields=["attempts"])
+            remaining = max(0, reset_token.max_attempts - reset_token.attempts)
+            return Response({
+                "error": "invalid_code",
+                "detail": f"Invalid verification code. {remaining} attempt(s) remaining."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            "status": "valid",
+            "message": "Verification code is valid. You may now choose your new password."
+        }, status=status.HTTP_200_OK)
+
+
+class PasswordResetConfirmView(APIView):
+    """
+    POST /api/v1/auth/password-reset/confirm/
+    Validate 6-digit OTP code, set new password, log audit event, and return auth tokens.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = PasswordResetConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        identifier = serializer.validated_data["identifier"]
+        code = serializer.validated_data["code"]
+        new_password = serializer.validated_data["new_password"]
+
+        user = _find_user_by_identifier(identifier)
+        if not user:
+            return Response({"error": "not_found", "detail": "Account not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        reset_token = PasswordResetToken.objects.filter(
+            user=user,
+            is_used=False,
+            expires_at__gt=timezone.now(),
+        ).order_by("-created_at").first()
+
+        if not reset_token:
+            return Response({
+                "error": "expired",
+                "detail": "Verification code has expired or was not requested. Please request a new code."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if reset_token.is_locked:
+            return Response({
+                "error": "locked",
+                "detail": "Maximum verification attempts exceeded. Please request a new code."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        code_hash = _hash_otp(code)
+        if reset_token.token_hash != code_hash:
+            reset_token.attempts += 1
+            reset_token.save(update_fields=["attempts"])
+            remaining = max(0, reset_token.max_attempts - reset_token.attempts)
+            return Response({
+                "error": "invalid_code",
+                "detail": f"Invalid verification code. {remaining} attempt(s) remaining."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Set new password
+        user.set_password(new_password)
+        user.save(update_fields=["password"])
+
+        # Mark token as used
+        reset_token.is_used = True
+        reset_token.save(update_fields=["is_used"])
+
+        # Audit log
+        AuditService.log_event(
+            action="USER_PASSWORD_RESET",
+            category=AuditLog.Category.AUTH,
+            actor=user,
+            request=request,
+            status=AuditLog.Status.SUCCESS,
+            target_type="User",
+            target_id=str(user.id),
+            target_repr=f"{user.full_name} ({user.email})",
+            description=f"User '{user.email}' reset account password via {reset_token.channel.upper()} OTP verification.",
+            metadata={"channel": reset_token.channel, "destination": reset_token.destination},
+        )
+
+        # Security confirmation notice
+        if reset_token.channel == "sms" and reset_token.destination:
+            try:
+                send_sms(
+                    phone=reset_token.destination,
+                    message="Security Alert: Your ASDAM Portal password was successfully reset. If this was not you, contact IT Support immediately.",
+                    sender_id="ASDAM",
+                    purpose="security_alert",
+                    recipient_name=user.full_name,
+                )
+            except Exception as e:
+                logger.warning("Could not send SMS security alert: %s", e)
+        elif user.email:
+            try:
+                send_mail(
+                    subject="ASDAM Portal — Password Reset Confirmation",
+                    message=f"Dear {user.first_name},\n\nYour ASDAM Student Portal password was successfully reset on {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}.\n\nIf you did not perform this action, please alert IT Support immediately.\n\nBest regards,\nASDAM ICT Directorate",
+                    from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@asdam.edu.gh"),
+                    recipient_list=[user.email],
+                    fail_silently=True,
+                )
+            except Exception as e:
+                logger.warning("Could not send email security alert: %s", e)
+
+        refresh = RefreshToken.for_user(user)
+        logger.info("Password successfully reset for %s [%s]", user.email, user.student_id)
+        return Response({
+            "status": "success",
+            "message": "Your password has been successfully reset. You can now sign in.",
+            "user": UserSerializer(user, context={"request": request}).data,
+            "tokens": {
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+            }
         }, status=status.HTTP_200_OK)
 
 

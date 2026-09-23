@@ -373,3 +373,43 @@ class AuditLog(models.Model):
         # Strict immutability guarantee: audit records can NEVER be deleted
         raise RuntimeError("AuditLog records are permanent and cannot be deleted.")
 
+
+class PasswordResetToken(models.Model):
+    """Secure OTP token for self-service password reset via SMS or Email."""
+
+    class Channel(models.TextChoices):
+        SMS = "sms", "SMS"
+        EMAIL = "email", "Email"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="password_reset_tokens")
+    token_hash = models.CharField(max_length=128, db_index=True)
+    channel = models.CharField(max_length=10, choices=Channel.choices, default=Channel.SMS)
+    destination = models.CharField(max_length=255, blank=True)
+    expires_at = models.DateTimeField(db_index=True)
+    is_used = models.BooleanField(default=False, db_index=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    max_attempts = models.PositiveSmallIntegerField(default=5)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        db_table = "password_reset_tokens"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "is_used", "expires_at"]),
+            models.Index(fields=["token_hash", "is_used"]),
+        ]
+
+    def __str__(self):
+        return f"PasswordResetToken for {self.user.email} via {self.channel} (used={self.is_used})"
+
+    @property
+    def is_expired(self) -> bool:
+        return timezone.now() >= self.expires_at
+
+    @property
+    def is_locked(self) -> bool:
+        return self.attempts >= self.max_attempts
+
+

@@ -43,6 +43,12 @@ class User(AbstractBaseUser, PermissionsMixin):
         ADMIN = "admin", "Admin (Legacy)"
         STAFF = "staff", "Staff (Legacy)"
         INSTRUCTOR = "instructor", "Instructor (Legacy)"
+        SUPER_ADMIN_HYPHEN = "super-admin", "Super Admin (Alias)"
+        ACADEMIC_OFFICER_HYPHEN = "academic-officer", "Academic Officer (Alias)"
+        DEPARTMENTAL_HEAD = "departmental-head", "Departmental Head (Alias)"
+        HEAD_OF_DEPARTMENT_HYPHEN = "head-of-department", "Head of Department (Alias)"
+        FINANCE_OFFICER = "finance-officer", "Finance Officer (Alias)"
+        FINANCE_OFFICER_UNDERSCORE = "finance_officer", "Finance Officer (Alias)"
 
     class AcademicStatus(models.TextChoices):
         ACTIVE = "active", "Active"
@@ -119,6 +125,12 @@ class User(AbstractBaseUser, PermissionsMixin):
         self.is_active = True
         self.academic_status = self.AcademicStatus.ACTIVE
         self.save(update_fields=["deleted_at", "is_active", "academic_status"])
+
+    def save(self, *args, **kwargs):
+        if self.role:
+            from .constants import normalize_role
+            self.role = normalize_role(self.role)
+        super().save(*args, **kwargs)
 
     @property
     def normalized_role(self):

@@ -598,7 +598,10 @@ class UserViewSet(viewsets.ModelViewSet):
 
         role = self.request.query_params.get("role")
         if role and role != "all":
-            qs = qs.filter(role=role)
+            from .constants import normalize_role
+            from django.db.models import Q
+            norm_role = normalize_role(role)
+            qs = qs.filter(Q(role=role) | Q(role=norm_role))
 
         user_type = self.request.query_params.get("user_type")
         if user_type == "student":
@@ -745,7 +748,9 @@ class UserViewSet(viewsets.ModelViewSet):
         return UserSerializer
 
     def create(self, request, *args, **kwargs):
-        if request.data.get("role") == "super_admin" and not getattr(request.user, "is_super_admin", False):
+        from .constants import normalize_role
+        req_role = normalize_role(request.data.get("role", ""))
+        if req_role == "super_admin" and not getattr(request.user, "is_super_admin", False):
             return Response(
                 {"detail": "Permission denied: Only Super Administrators can create Super Administrator accounts."},
                 status=status.HTTP_403_FORBIDDEN
@@ -1046,7 +1051,7 @@ class UserViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["delete", "post"], url_path="permanent-delete")
     def permanent_delete(self, request, pk=None):
-        if request.user.role != "admin" and not request.user.is_superuser:
+        if not getattr(request.user, "is_super_admin", False) and getattr(request.user, "role", "") not in ("admin", "super_admin"):
             return Response(
                 {"detail": "Permission denied: Only System Administrators can permanently purge student records."},
                 status=status.HTTP_403_FORBIDDEN

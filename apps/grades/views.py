@@ -67,11 +67,11 @@ class AssignmentViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role == "instructor":
+        if getattr(user, "is_instructor_role", False) or user.role in ("instructor", "lecturer"):
             qs = Assignment.objects.select_related("course").filter(
                 course__instructors=user
             )
-        elif user.role in ("staff", "admin"):
+        elif getattr(user, "is_academic_officer", False) or getattr(user, "is_super_admin", False) or getattr(user, "is_hod", False) or user.role in ("staff", "admin", "academic_officer", "super_admin", "head_of_department"):
             qs = Assignment.objects.select_related("course").all()
         else:
             # Students see published assignments for their enrolled courses
@@ -104,7 +104,7 @@ class AssignmentViewSet(viewsets.ModelViewSet):
             return Response({"error": "not_found", "detail": "Assignment not found."}, status=status.HTTP_404_NOT_FOUND)
 
         from apps.courses.models import Enrollment
-        if not Enrollment.objects.filter(student=request.user, course=assignment.course, status=Enrollment.Status.ACTIVE).exists() and request.user.role not in ("admin",):
+        if not Enrollment.objects.filter(student=request.user, course=assignment.course, status=Enrollment.Status.ACTIVE).exists() and not (getattr(request.user, "is_super_admin", False) or request.user.role in ("admin", "super_admin")):
             return Response({"error": "not_enrolled", "detail": "You must be actively enrolled in this course to submit work."}, status=status.HTTP_403_FORBIDDEN)
 
         is_late = False
@@ -207,7 +207,7 @@ class GradeBatchViewSet(
         qs   = GradeBatch.objects.select_related(
             "assignment__course", "submitted_by", "reviewed_by"
         )
-        if user.role in ("staff", "admin") or role == "officer":
+        if getattr(user, "is_academic_officer", False) or getattr(user, "is_super_admin", False) or getattr(user, "is_hod", False) or user.role in ("staff", "admin", "academic_officer", "super_admin", "head_of_department") or role == "officer":
             # Officers see all pending/approved/rejected
             return qs.order_by("-submitted_at")
         else:
@@ -286,7 +286,7 @@ class GradeBatchViewSet(
     @action(detail=True, methods=["patch"], url_path="submit")
     def submit(self, request, pk=None):
         batch = self.get_object()
-        if batch.assignment.course.instructors.filter(pk=request.user.pk).exists() is False and request.user.role not in ("admin",):
+        if batch.assignment.course.instructors.filter(pk=request.user.pk).exists() is False and not (getattr(request.user, "is_super_admin", False) or request.user.role in ("admin", "super_admin")):
             return Response({"error": "forbidden", "detail": "Not your course."}, status=403)
         serializer = SubmitBatchSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -300,7 +300,7 @@ class GradeBatchViewSet(
     # ── OFFICER: approve ─────────────────────────────────────────────────────
     @action(detail=True, methods=["patch"], url_path="approve")
     def approve(self, request, pk=None):
-        if request.user.role not in ("staff", "admin"):
+        if not (getattr(request.user, "is_academic_officer", False) or getattr(request.user, "is_super_admin", False) or getattr(request.user, "is_hod", False) or request.user.role in ("staff", "admin", "academic_officer", "super_admin", "head_of_department")):
             return Response({"error": "forbidden", "detail": "Only academic officers can approve batches."}, status=403)
         batch = self.get_object()
         try:
@@ -328,7 +328,7 @@ class GradeBatchViewSet(
     # ── OFFICER: reject ──────────────────────────────────────────────────────
     @action(detail=True, methods=["patch"], url_path="reject")
     def reject(self, request, pk=None):
-        if request.user.role not in ("staff", "admin"):
+        if not (getattr(request.user, "is_academic_officer", False) or getattr(request.user, "is_super_admin", False) or getattr(request.user, "is_hod", False) or request.user.role in ("staff", "admin", "academic_officer", "super_admin", "head_of_department")):
             return Response({"error": "forbidden", "detail": "Only academic officers can reject batches."}, status=403)
         batch = self.get_object()
         serializer = RejectBatchSerializer(data=request.data)
@@ -343,7 +343,7 @@ class GradeBatchViewSet(
     # ── OFFICER: publish ─────────────────────────────────────────────────────
     @action(detail=True, methods=["patch"], url_path="publish")
     def publish(self, request, pk=None):
-        if request.user.role not in ("staff", "admin"):
+        if not (getattr(request.user, "is_academic_officer", False) or getattr(request.user, "is_super_admin", False) or getattr(request.user, "is_hod", False) or request.user.role in ("staff", "admin", "academic_officer", "super_admin", "head_of_department")):
             return Response({"error": "forbidden", "detail": "Only academic officers can publish results."}, status=403)
         batch = self.get_object()
         try:

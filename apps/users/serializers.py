@@ -105,7 +105,14 @@ class RegisterSerializer(serializers.Serializer):
     password   = serializers.CharField(write_only=True, min_length=8)
     first_name = serializers.CharField(max_length=150)
     last_name  = serializers.CharField(max_length=150)
-    role       = serializers.ChoiceField(choices=["student", "instructor"], default="student")
+    role       = serializers.CharField(required=False, default="student")
+
+    def validate_role(self, value):
+        from .constants import normalize_role, RoleChoice
+        norm = normalize_role(value)
+        if norm not in (RoleChoice.STUDENT, RoleChoice.LECTURER):
+            raise serializers.ValidationError("Public registration only allows student or instructor accounts.")
+        return norm
 
     def validate_email(self, value):
         if User.objects.filter(email=value).exists():
@@ -139,6 +146,7 @@ class ChangePasswordSerializer(serializers.Serializer):
 
 class AdminCreateUserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False, min_length=6)
+    role = serializers.CharField(required=False, allow_blank=True)
 
     class Meta:
         model = User
@@ -147,6 +155,16 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
             "department", "phone", "is_active", "program", "class_name", 
             "admission_year", "student_id", "moh_pin", "serial_number", "is_registered"
         ]
+
+    def validate_role(self, value):
+        if value:
+            from .constants import normalize_role, RoleChoice
+            normalized = normalize_role(value)
+            valid_roles = [r[0] for r in RoleChoice.CHOICES]
+            if normalized not in valid_roles:
+                raise serializers.ValidationError(f"Invalid role '{value}'. Must be one of: {valid_roles}")
+            return normalized
+        return value
 
     def validate_password(self, value):
         if value:

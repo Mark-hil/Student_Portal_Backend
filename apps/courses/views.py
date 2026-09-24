@@ -93,9 +93,9 @@ class CourseViewSet(viewsets.ModelViewSet):
             )
         )
         user = self.request.user
-        if user.role == "student":
+        if getattr(user, "is_student_role", False) or user.role == "student":
             qs = qs.filter(status=Course.Status.ACTIVE)
-        elif user.role == "instructor":
+        elif getattr(user, "is_instructor_role", False) or user.role in ("instructor", "lecturer"):
             qs = qs.filter(Q(status=Course.Status.ACTIVE) | Q(instructors=user)).distinct()
         return qs
 
@@ -111,7 +111,7 @@ class CourseViewSet(viewsets.ModelViewSet):
 
     # ── Catalog (cached for anonymous/students) ───────────────────────────
     def list(self, request, *args, **kwargs):
-        if request.user.role == "student":
+        if getattr(request.user, "is_student_role", False) or request.user.role == "student":
             cache_key = f"course_list:{request.GET.urlencode()}"
             cached = cache.get(cache_key)
             if cached:
@@ -124,7 +124,7 @@ class CourseViewSet(viewsets.ModelViewSet):
     # ── My courses ────────────────────────────────────────────────────────
     @action(detail=False, methods=["get"], url_path="my-courses")
     def my_courses(self, request):
-        if request.user.role == "instructor":
+        if getattr(request.user, "is_instructor_role", False) or request.user.role in ("instructor", "lecturer"):
             courses = (
                 Course.objects
                 .filter(instructors=request.user)
@@ -197,7 +197,7 @@ class CourseViewSet(viewsets.ModelViewSet):
     # ── Manage Registration Window (Admin/Staff) ───────────────────────────
     @action(detail=False, methods=["post", "patch"], url_path="registration-window/manage", permission_classes=[IsAuthenticated])
     def manage_registration_window(self, request):
-        if request.user.role not in ("admin", "staff") and not request.user.is_staff:
+        if not (getattr(request.user, "is_academic_officer", False) or getattr(request.user, "is_super_admin", False) or request.user.is_staff or request.user.role in ("admin", "staff", "academic_officer", "super_admin")):
             return Response({"detail": "Only academic staff and administrators can manage registration windows."}, status=status.HTTP_403_FORBIDDEN)
         
         semester = request.data.get("semester") or "Spring 2025"
@@ -239,7 +239,7 @@ class CourseViewSet(viewsets.ModelViewSet):
     # ── Registration Reports & CSV Exports ────────────────────────────────
     @action(detail=False, methods=["get"], url_path="reports/registration-stats", permission_classes=[IsAuthenticated])
     def registration_stats(self, request):
-        if request.user.role not in ("admin", "staff") and not request.user.is_staff:
+        if not (getattr(request.user, "is_academic_officer", False) or getattr(request.user, "is_super_admin", False) or request.user.is_staff or request.user.role in ("admin", "staff", "academic_officer", "super_admin")):
             return Response({"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
 
         from django.contrib.auth import get_user_model
@@ -274,7 +274,7 @@ class CourseViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="reports/registered-csv", permission_classes=[IsAuthenticated])
     def registered_csv(self, request):
-        if request.user.role not in ("admin", "staff") and not request.user.is_staff:
+        if not (getattr(request.user, "is_academic_officer", False) or getattr(request.user, "is_super_admin", False) or request.user.is_staff or request.user.role in ("admin", "staff", "academic_officer", "super_admin")):
             return Response({"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
 
         import csv
@@ -326,7 +326,7 @@ class CourseViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="reports/unregistered-csv", permission_classes=[IsAuthenticated])
     def unregistered_csv(self, request):
-        if request.user.role not in ("admin", "staff") and not request.user.is_staff:
+        if not (getattr(request.user, "is_academic_officer", False) or getattr(request.user, "is_super_admin", False) or request.user.is_staff or request.user.role in ("admin", "staff", "academic_officer", "super_admin")):
             return Response({"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
 
         import csv
@@ -409,9 +409,9 @@ class CourseViewSet(viewsets.ModelViewSet):
         """Instructor/admin class roster with enrollment details and running grades."""
         course = self.get_object()
         user = request.user
-        if user.role == "instructor" and not course.instructors.filter(pk=user.pk).exists():
+        if (getattr(user, "is_instructor_role", False) or user.role in ("instructor", "lecturer")) and not course.instructors.filter(pk=user.pk).exists():
             return Response({"error": "forbidden", "detail": "You do not instruct this course."}, status=status.HTTP_403_FORBIDDEN)
-        if user.role not in ("instructor", "staff", "admin") and not user.is_staff:
+        if not (getattr(user, "is_instructor_role", False) or getattr(user, "is_academic_officer", False) or getattr(user, "is_super_admin", False) or user.is_staff or user.role in ("instructor", "lecturer", "staff", "admin", "academic_officer", "super_admin")):
             return Response({"error": "forbidden", "detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
 
         from apps.grades.gpa import compute_course_final_grade
@@ -459,9 +459,9 @@ class CourseViewSet(viewsets.ModelViewSet):
 
         course = self.get_object()
         user = request.user
-        if user.role == "instructor" and not course.instructors.filter(pk=user.pk).exists():
+        if (getattr(user, "is_instructor_role", False) or user.role in ("instructor", "lecturer")) and not course.instructors.filter(pk=user.pk).exists():
             return Response({"error": "forbidden", "detail": "You do not instruct this course."}, status=status.HTTP_403_FORBIDDEN)
-        if user.role not in ("instructor", "staff", "admin") and not user.is_staff:
+        if not (getattr(user, "is_instructor_role", False) or getattr(user, "is_academic_officer", False) or getattr(user, "is_super_admin", False) or user.is_staff or user.role in ("instructor", "lecturer", "staff", "admin", "academic_officer", "super_admin")):
             return Response({"error": "forbidden", "detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
 
         timestamp_str = timezone.now().strftime("%Y%m%d_%H%M")
@@ -524,9 +524,9 @@ class CourseViewSet(viewsets.ModelViewSet):
 
         course = self.get_object()
         user = request.user
-        if user.role == "instructor" and not course.instructors.filter(pk=user.pk).exists():
+        if (getattr(user, "is_instructor_role", False) or user.role in ("instructor", "lecturer")) and not course.instructors.filter(pk=user.pk).exists():
             return Response({"error": "forbidden", "detail": "You do not instruct this course."}, status=status.HTTP_403_FORBIDDEN)
-        if user.role not in ("instructor", "staff", "admin") and not user.is_staff:
+        if not (getattr(user, "is_instructor_role", False) or getattr(user, "is_academic_officer", False) or getattr(user, "is_super_admin", False) or user.is_staff or user.role in ("instructor", "lecturer", "staff", "admin", "academic_officer", "super_admin")):
             return Response({"error": "forbidden", "detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
 
         assignments = list(course.assignments.all().order_by("due_date", "created_at"))
@@ -591,17 +591,17 @@ class LessonViewSet(viewsets.ModelViewSet):
         qs = Lesson.objects.all().select_related("course")
         if course_id:
             qs = qs.filter(course_id=course_id)
-        if user.role == "student":
+        if getattr(user, "is_student_role", False) or user.role == "student":
             enrolled = Enrollment.objects.filter(student=user, status=Enrollment.Status.ACTIVE).values_list("course_id", flat=True)
             qs = qs.filter(course_id__in=enrolled)
-        elif user.role == "instructor":
+        elif getattr(user, "is_instructor_role", False) or user.role in ("instructor", "lecturer"):
             qs = qs.filter(course__instructors=user)
         return qs.order_by("order")
 
     def perform_create(self, serializer):
         user = self.request.user
         course = serializer.validated_data["course"]
-        if user.role == "instructor" and not course.instructors.filter(pk=user.pk).exists():
+        if (getattr(user, "is_instructor_role", False) or user.role in ("instructor", "lecturer")) and not course.instructors.filter(pk=user.pk).exists():
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("You do not instruct this course.")
         serializer.save(published_at=timezone.now())

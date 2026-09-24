@@ -298,3 +298,41 @@ class TestDRFPermissionClasses:
         # Lecturer does not have users.manage_roles by default
         ManagePerm = HasFunctionPermission("users.manage_roles")
         assert ManagePerm().has_permission(req_lecturer, None) is False
+
+    def test_legacy_and_hyphenated_roles_create_update_and_filter(self, api_client, super_admin, student_user):
+        api_client.force_authenticate(user=super_admin)
+
+        # 1. Update user with 'super-admin'
+        url = f"/api/v1/users/manage/{student_user.id}/"
+        res = api_client.patch(url, {"role": "super-admin"}, format="json")
+        assert res.status_code == 200, res.data
+        assert res.data["role"] == "super_admin"
+        student_user.refresh_from_db()
+        assert student_user.role == "super_admin"
+
+        # 2. Update user with 'departmental-head'
+        res = api_client.patch(url, {"role": "departmental-head"}, format="json")
+        assert res.status_code == 200, res.data
+        assert res.data["role"] == "head_of_department"
+        student_user.refresh_from_db()
+        assert student_user.role == "head_of_department"
+
+        # 3. Update user with 'academic-officer'
+        res = api_client.patch(url, {"role": "academic-officer"}, format="json")
+        assert res.status_code == 200, res.data
+        assert res.data["role"] == "academic_officer"
+        student_user.refresh_from_db()
+        assert student_user.role == "academic_officer"
+
+        # 4. Update user with 'finance-officer'
+        res = api_client.patch(url, {"role": "finance-officer"}, format="json")
+        assert res.status_code == 200, res.data
+        assert res.data["role"] == "finance"
+        student_user.refresh_from_db()
+        assert student_user.role == "finance"
+
+        # 5. Filter users with 'super-admin'
+        filter_res = api_client.get("/api/v1/users/manage/?role=super-admin")
+        assert filter_res.status_code == 200
+        emails = [u["email"] for u in filter_res.data.get("results", filter_res.data)]
+        assert super_admin.email in emails

@@ -1,4 +1,5 @@
 """Grade serializers — full workflow: lecturer upload, officer review, student view."""
+from decimal import Decimal
 from rest_framework import serializers
 from .models import Grade, GradeBatch, Assignment, SemesterRecord, Transcript, Submission
 
@@ -66,7 +67,7 @@ class AssignmentCreateSerializer(serializers.ModelSerializer):
 class BatchGradeEntrySerializer(serializers.Serializer):
     """Used when lecturer uploads individual scores."""
     student_id = serializers.CharField()
-    score      = serializers.DecimalField(max_digits=6, decimal_places=2, min_value=0)
+    score      = serializers.DecimalField(max_digits=6, decimal_places=2, min_value=Decimal("0.00"))
     feedback   = serializers.CharField(max_length=1000, required=False, allow_blank=True)
 
 

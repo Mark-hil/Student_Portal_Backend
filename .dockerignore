@@ -1,0 +1,12 @@
+.venv
+.git
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.coverage*
+db.sqlite3
+media/
+staticfiles/
+test_output.txt
+scratch.py

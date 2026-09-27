@@ -25,6 +25,8 @@ INSTALLED_APPS = [
     "corsheaders",
     "django_filters",
     "storages",
+    "cloudinary",
+    "cloudinary_storage",
     "django_celery_beat",
     "django_celery_results",
     # Internal apps

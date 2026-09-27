@@ -1,35 +1,17 @@
-version: "3.9"
-
 services:
-  # ── PostgreSQL ──────────────────────────────────────────────────────────
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: portal_db
-      POSTGRES_USER: portal_user
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U portal_user -d portal_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks: [portal_net]
-
-  # ── Redis ───────────────────────────────────────────────────────────────
+  # ── Redis (Celery queue & Channels layer) ───────────────────────────────
   redis:
     image: redis:7-alpine
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD}
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD:-devredispassword}
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-devredispassword}", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
     networks: [portal_net]
+    restart: unless-stopped
 
   # ── Django API ──────────────────────────────────────────────────────────
   api:
@@ -40,16 +22,26 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY}
-      DB_HOST: db
-      DB_NAME: portal_db
-      DB_USER: portal_user
-      DB_PASSWORD: ${DB_PASSWORD}
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
-      ALLOWED_HOSTS: ${ALLOWED_HOSTS}
-      CORS_ORIGINS: ${CORS_ORIGINS}
+      # Neon Database Connection
+      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_REPLICA_URL: ${DATABASE_REPLICA_URL:-}
+      DB_HOST: ${DB_HOST:-}
+      DB_NAME: ${DB_NAME:-portal_db}
+      DB_USER: ${DB_USER:-portal_user}
+      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_PORT: ${DB_PORT:-5432}
+      # Cloudinary Media Storage
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-}
+      CLOUDINARY_PROFILE_FOLDER: ${CLOUDINARY_PROFILE_FOLDER:-uniportal-profile picture}
+      # Redis, Network & Security
+      REDIS_URL: ${REDIS_URL:-redis://:${REDIS_PASSWORD:-devredispassword}@redis:6379/0}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost,http://localhost:5173}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      SENTRY_DSN: ${SENTRY_DSN:-}
     depends_on:
-      db:
-        condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
@@ -59,13 +51,12 @@ services:
     ports:
       - "8000:8000"
     deploy:
-      replicas: 2
       resources:
         limits:
           cpus: "1"
           memory: 512M
 
-  # ── Celery Worker ───────────────────────────────────────────────────────
+  # ── Celery Worker (notifications, grades, file processing) ──────────────
   worker:
     build:
       context: .
@@ -74,11 +65,20 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY}
-      DB_HOST: db
-      DB_NAME: portal_db
-      DB_USER: portal_user
-      DB_PASSWORD: ${DB_PASSWORD}
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      # Neon Database Connection
+      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_REPLICA_URL: ${DATABASE_REPLICA_URL:-}
+      DB_HOST: ${DB_HOST:-}
+      DB_NAME: ${DB_NAME:-portal_db}
+      DB_USER: ${DB_USER:-portal_user}
+      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_PORT: ${DB_PORT:-5432}
+      # Cloudinary Media Storage
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-}
+      CLOUDINARY_PROFILE_FOLDER: ${CLOUDINARY_PROFILE_FOLDER:-uniportal-profile picture}
+      REDIS_URL: ${REDIS_URL:-redis://:${REDIS_PASSWORD:-devredispassword}@redis:6379/0}
     depends_on:
       - api
     networks: [portal_net]
@@ -93,15 +93,42 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY}
-      DB_HOST: db
-      DB_NAME: portal_db
-      DB_USER: portal_user
-      DB_PASSWORD: ${DB_PASSWORD}
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      # Neon Database Connection
+      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_REPLICA_URL: ${DATABASE_REPLICA_URL:-}
+      DB_HOST: ${DB_HOST:-}
+      DB_NAME: ${DB_NAME:-portal_db}
+      DB_USER: ${DB_USER:-portal_user}
+      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_PORT: ${DB_PORT:-5432}
+      # Cloudinary Media Storage
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-}
+      CLOUDINARY_PROFILE_FOLDER: ${CLOUDINARY_PROFILE_FOLDER:-uniportal-profile picture}
+      REDIS_URL: ${REDIS_URL:-redis://:${REDIS_PASSWORD:-devredispassword}@redis:6379/0}
     depends_on:
       - api
     networks: [portal_net]
     restart: unless-stopped
+
+  # ── Local PostgreSQL (Optional fallback for offline local development) ──
+  db:
+    image: postgres:16-alpine
+    profiles: ["local-db"]
+    environment:
+      POSTGRES_DB: portal_db
+      POSTGRES_USER: portal_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-portal_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portal_user -d portal_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks: [portal_net]
 
 volumes:
   postgres_data:

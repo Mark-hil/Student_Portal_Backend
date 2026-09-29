@@ -23,7 +23,7 @@ from .serializers import (
     DropEnrollmentSerializer, LessonSerializer,
 )
 from .registration import RegistrationService, RegistrationError
-from core.permissions import IsInstructor, IsAdminOrReadOnly, IsAdminOrStaff
+from core.permissions import IsInstructor, IsAdminOrReadOnly, IsAdminOrStaff, IsStudentRegistered
 from core.pagination import StandardResultsPagination, CursorPagination
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,8 @@ class CourseViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ["create", "update", "partial_update", "destroy"]:
             return [IsAdminOrStaff()]
+        if self.action in ["register", "bulk_register", "my_courses"]:
+            return [IsAuthenticated(), IsStudentRegistered()]
         return super().get_permissions()
 
     def get_queryset(self):
@@ -109,10 +111,10 @@ class CourseViewSet(viewsets.ModelViewSet):
         ctx.update(_build_enrollment_context(self.request.user))
         return ctx
 
-    # ── Catalog (cached for anonymous/students) ───────────────────────────
+    # ── Catalog (cached per student to respect personalized enrollment states) ──
     def list(self, request, *args, **kwargs):
-        if getattr(request.user, "is_student_role", False) or request.user.role == "student":
-            cache_key = f"course_list:{request.GET.urlencode()}"
+        if getattr(request.user, "is_student_role", False) or getattr(request.user, "role", "") == "student":
+            cache_key = f"course_list:{request.user.id}:{request.GET.urlencode()}"
             cached = cache.get(cache_key)
             if cached:
                 return Response(cached)
@@ -641,7 +643,7 @@ class EnrollmentViewSet(
     mixins.RetrieveModelMixin,
     viewsets.GenericViewSet,
 ):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsStudentRegistered]
     serializer_class = EnrollmentSerializer
     pagination_class = StandardResultsPagination
 

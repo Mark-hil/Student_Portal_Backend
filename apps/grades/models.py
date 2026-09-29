@@ -377,3 +377,176 @@ class Transcript(models.Model):
 
     def __str__(self):
         return f"{self.student.email} — {self.course.code} ({self.semester}): {self.final_grade}"
+
+
+class GradeAppeal(models.Model):
+    """
+    Formal grade correction / appeal request workflow with multi-stage approval
+    and immutable institutional audit logging.
+    Lifecycle:
+      pending → under_review → hod_approved → approved (score updated, GPA recomputed) or rejected.
+    """
+    class Status(models.TextChoices):
+        PENDING      = "pending",      "Pending Review"
+        UNDER_REVIEW = "under_review", "Under Review"
+        HOD_APPROVED = "hod_approved", "HOD Endorsed"
+        APPROVED     = "approved",     "Approved & Corrected"
+        REJECTED     = "rejected",     "Rejected"
+
+    id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    grade            = models.ForeignKey(Grade, on_delete=models.CASCADE, related_name="appeals")
+    student          = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="grade_appeals")
+    course           = models.ForeignKey("courses.Course", on_delete=models.CASCADE, related_name="grade_appeals")
+
+    # Scores
+    original_score   = models.DecimalField(max_digits=6, decimal_places=2)
+    suggested_score  = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    final_score      = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+
+    reason           = models.TextField(help_text="Detailed justification for the grade appeal or correction")
+    supporting_doc   = models.ForeignKey("files.UploadedFile", on_delete=models.SET_NULL, null=True, blank=True, related_name="grade_appeals")
+
+    status           = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True)
+
+    # Review & Endorsement notes
+    lecturer_comment = models.TextField(blank=True)
+    hod_comment      = models.TextField(blank=True)
+    decision_notes   = models.TextField(blank=True)
+
+    reviewed_by      = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="reviewed_grade_appeals"
+    )
+    reviewed_at      = models.DateTimeField(null=True, blank=True)
+
+    created_at       = models.DateTimeField(default=timezone.now, db_index=True)
+    updated_at       = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "grade_appeals"
+        ordering = ["-created_at"]
+        indexes  = [
+            models.Index(fields=["student", "status"]),
+            models.Index(fields=["course", "status"]),
+            models.Index(fields=["status", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"Appeal: {self.student.email} - {self.course.code} [{self.status}]"
+
+    def approve(self, officer, final_score: Decimal = None, notes: str = ""):
+        """Academic Officer approves appeal, updates Grade score, recomputes GPA, and logs audit."""
+        old_score = self.grade.score
+        new_score = final_score if final_score is not None else (self.suggested_score or self.original_score)
+
+        self.status = self.Status.APPROVED
+        self.final_score = new_score
+        self.reviewed_by = officer
+        self.reviewed_at = timezone.now()
+        self.decision_notes = notes
+        self.save(update_fields=["status", "final_score", "reviewed_by", "reviewed_at", "decision_notes", "updated_at"])
+
+        # Update underlying grade
+        self.grade.score = new_score
+        self.grade.save(update_fields=["score", "updated_at"])
+
+        # Recompute GPA
+        from apps.grades.tasks import recompute_gpa_for_student
+        semester = self.course.semester or "unknown"
+        recompute_gpa_for_student.delay(
+            student_id=str(self.student.id),
+            semester=semester,
+            semester_label=semester,
+        )
+
+        # Institutional Audit Log
+        from apps.users.services.audit_service import AuditService
+        from apps.users.models import AuditLog
+        AuditService.log_event(
+            action="grade_appeal_approved",
+            category=AuditLog.Category.ACADEMICS,
+            actor=officer,
+            status=AuditLog.Status.SUCCESS,
+            target_type="GradeAppeal",
+            target_id=str(self.id),
+            target_repr=f"{self.student.email} - {self.course.code}",
+            description=f"Grade appeal approved. Score changed from {old_score} to {new_score}.",
+            changes={"score": {"old": float(old_score) if old_score is not None else None, "new": float(new_score)}},
+            metadata={"appeal_id": str(self.id), "grade_id": str(self.grade.id), "course": self.course.code},
+        )
+
+        # Notify student
+        from apps.notifications.tasks import create_notification, send_email_notification
+        create_notification.delay(
+            user_id=str(self.student.id),
+            notif_type="grade_appeal_approved",
+            title=f"Grade Appeal Approved: {self.course.code}",
+            body=f"Your grade appeal for {self.course.code} ({self.grade.assignment.title}) has been approved. Score updated to {new_score}.",
+            data={"appeal_id": str(self.id), "course_code": self.course.code, "final_score": str(new_score)},
+        )
+        send_email_notification.delay(
+            user_id=str(self.student.id),
+            subject=f"[UniPortal] Grade Appeal Approved: {self.course.code}",
+            body=f"Your grade appeal for {self.course.code} has been approved. Score updated to {new_score}. Notes: {notes or 'None'}",
+        )
+
+    def reject(self, reviewer, notes: str):
+        """Reject appeal with recorded rationale, audit log, and notification."""
+        self.status = self.Status.REJECTED
+        self.reviewed_by = reviewer
+        self.reviewed_at = timezone.now()
+        self.decision_notes = notes
+        self.save(update_fields=["status", "reviewed_by", "reviewed_at", "decision_notes", "updated_at"])
+
+        from apps.users.services.audit_service import AuditService
+        from apps.users.models import AuditLog
+        AuditService.log_event(
+            action="grade_appeal_rejected",
+            category=AuditLog.Category.ACADEMICS,
+            actor=reviewer,
+            status=AuditLog.Status.SUCCESS,
+            target_type="GradeAppeal",
+            target_id=str(self.id),
+            target_repr=f"{self.student.email} - {self.course.code}",
+            description=f"Grade appeal rejected. Reason/Notes: {notes}",
+            changes={"status": {"old": self.Status.PENDING, "new": self.Status.REJECTED}},
+            metadata={"appeal_id": str(self.id), "grade_id": str(self.grade.id), "notes": notes},
+        )
+
+        from apps.notifications.tasks import create_notification, send_email_notification
+        create_notification.delay(
+            user_id=str(self.student.id),
+            notif_type="grade_appeal_rejected",
+            title=f"Grade Appeal Rejected: {self.course.code}",
+            body=f"Your grade appeal for {self.course.code} was reviewed and rejected. Notes: {notes or 'No notes provided.'}",
+            data={"appeal_id": str(self.id), "course_code": self.course.code},
+        )
+        send_email_notification.delay(
+            user_id=str(self.student.id),
+            subject=f"[UniPortal] Grade Appeal Decision: {self.course.code}",
+            body=f"Your grade appeal for {self.course.code} was reviewed and rejected.\n\nDecision Notes: {notes}",
+        )
+
+    def endorse_hod(self, hod, comment: str):
+        """Head of Department endorses appeal before final officer decision."""
+        self.status = self.Status.HOD_APPROVED
+        self.hod_comment = comment
+        self.reviewed_by = hod
+        self.reviewed_at = timezone.now()
+        self.save(update_fields=["status", "hod_comment", "reviewed_by", "reviewed_at", "updated_at"])
+
+        from apps.users.services.audit_service import AuditService
+        from apps.users.models import AuditLog
+        AuditService.log_event(
+            action="grade_appeal_hod_endorsed",
+            category=AuditLog.Category.ACADEMICS,
+            actor=hod,
+            status=AuditLog.Status.SUCCESS,
+            target_type="GradeAppeal",
+            target_id=str(self.id),
+            target_repr=f"{self.student.email} - {self.course.code}",
+            description=f"HOD endorsed grade appeal with comments: {comment}",
+            changes={"status": {"new": self.Status.HOD_APPROVED}},
+            metadata={"appeal_id": str(self.id), "comment": comment},
+        )
+

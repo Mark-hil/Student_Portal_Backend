@@ -28,16 +28,17 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
-from .models import Grade, GradeBatch, Assignment, SemesterRecord, Transcript, Submission
+from .models import Grade, GradeBatch, Assignment, SemesterRecord, Transcript, Submission, GradeAppeal
 from .serializers import (
     GradeSerializer, AssignmentSerializer, AssignmentCreateSerializer,
     GradeBatchListSerializer, GradeBatchDetailSerializer,
     BatchGradeEntrySerializer, SubmitBatchSerializer, RejectBatchSerializer,
     TranscriptRowSerializer, SemesterRecordSerializer,
     SubmissionSerializer, SubmissionCreateSerializer,
+    GradeAppealSerializer, GradeAppealCreateSerializer, GradeAppealReviewSerializer,
 )
 from .gpa import compute_semester_gpa, compute_cumulative_gpa, letter_from_pct
-from core.permissions import IsInstructor
+from core.permissions import IsInstructor, IsStudentRegistered
 from core.pagination import StandardResultsPagination
 
 logger = logging.getLogger(__name__)
@@ -476,7 +477,7 @@ class GradeBatchViewSet(
 
 # ── Grade viewset (Student) ────────────────────────────────────────────────────
 class GradeViewSet(viewsets.ReadOnlyModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsStudentRegistered]
     serializer_class   = GradeSerializer
     pagination_class   = StandardResultsPagination
 
@@ -553,6 +554,22 @@ class GradeViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=["get"], url_path="transcript/pdf")
     def transcript_pdf(self, request):
         """Generates downloadable unofficial transcript PDF with watermark."""
+        # Enforce financial hold check for students
+        if getattr(request.user, "is_student_role", False) or getattr(request.user, "role", "") == "student":
+            try:
+                from apps.financials.models import FinancialHold
+                hold = FinancialHold.objects.filter(student=request.user, is_active=True).first()
+                if hold:
+                    return Response(
+                        {
+                            "error": "financial_hold",
+                            "detail": f"Official academic transcript is withheld due to outstanding semester fee arrears of GH₵ {hold.amount_due:,.2f}. Please settle your balance via Student Financials."
+                        },
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+            except Exception:
+                pass
+
         from django.http import HttpResponse
         from .pdf import build_transcript_pdf
 
@@ -626,3 +643,128 @@ class GradeViewSet(viewsets.ReadOnlyModelViewSet):
         cache.delete(f"gpa_summary:{request.user.id}")
         cache.delete(f"transcript:{request.user.id}")
         return Response({"detail": "GPA recomputation queued."})
+
+    @action(detail=False, methods=["post"], url_path="evaluate-academic-standing")
+    def evaluate_academic_standing(self, request):
+        """Admin/Officer endpoint to run institutional academic standing probation evaluator."""
+        user = request.user
+        if not (user.is_staff or getattr(user, "is_academic_officer", False) or getattr(user, "is_super_admin", False) or getattr(user, "role", "") in ("admin", "staff", "academic_officer", "super_admin")):
+            return Response({"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        from .tasks import evaluate_semester_academic_standing
+        curr_sem, _ = get_current_semester_info()
+        semester = request.data.get("semester", curr_sem)
+        academic_year = request.data.get("academic_year", "")
+        probation_threshold = float(request.data.get("probation_threshold", 1.5))
+        good_standing_threshold = float(request.data.get("good_standing_threshold", 1.5))
+        async_run = request.data.get("async", True)
+
+        if async_run:
+            evaluate_semester_academic_standing.delay(
+                semester=semester,
+                academic_year=academic_year,
+                probation_threshold=probation_threshold,
+                good_standing_threshold=good_standing_threshold,
+            )
+            return Response({"detail": f"Academic standing evaluation for {semester} queued via Celery."})
+        else:
+            result = evaluate_semester_academic_standing(
+                semester=semester,
+                academic_year=academic_year,
+                probation_threshold=probation_threshold,
+                good_standing_threshold=good_standing_threshold,
+            )
+            return Response(result)
+
+
+# ── Grade Appeals & Correction Requests ──────────────────────────────────────
+class GradeAppealViewSet(viewsets.ModelViewSet):
+    """
+    Formal grade appeal / correction request workflow with audit logging.
+    - Students can submit appeals for published grades.
+    - Lecturers / HOD can endorse and review appeals for their courses.
+    - Academic Officers / Admins approve or reject appeals, triggering score adjustments,
+      GPA recomputations, and permanent audit log records.
+    """
+    permission_classes = [IsAuthenticated, IsStudentRegistered]
+    pagination_class = StandardResultsPagination
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return GradeAppealCreateSerializer
+        return GradeAppealSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        if getattr(user, "is_academic_officer", False) or getattr(user, "is_super_admin", False) or user.role in ("staff", "admin", "academic_officer", "super_admin"):
+            qs = GradeAppeal.objects.all()
+        elif getattr(user, "is_instructor_role", False) or getattr(user, "is_hod", False) or user.role in ("instructor", "lecturer", "head_of_department"):
+            qs = GradeAppeal.objects.filter(course__instructors=user)
+        else:
+            qs = GradeAppeal.objects.filter(student=user)
+
+        status_filter = self.request.query_params.get("status")
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        course_id = self.request.query_params.get("course")
+        if course_id:
+            qs = qs.filter(course_id=course_id)
+
+        return qs.select_related("student", "course", "grade__assignment", "reviewed_by").order_by("-created_at")
+
+    def perform_create(self, serializer):
+        appeal = serializer.save()
+        # Notify lecturers of the course
+        from apps.notifications.tasks import create_notification
+        for instructor in appeal.course.instructors.filter(is_active=True):
+            create_notification.delay(
+                user_id=str(instructor.id),
+                notif_type="grade_appeal_submitted",
+                title=f"Grade Appeal Submitted: {appeal.course.code}",
+                body=f"Student {appeal.student.full_name} ({appeal.student.student_id or appeal.student.email}) submitted a grade appeal for {appeal.grade.assignment.title}.",
+                data={"appeal_id": str(appeal.id), "course_code": appeal.course.code},
+            )
+
+    @action(detail=True, methods=["post"], url_path="approve")
+    def approve(self, request, pk=None):
+        appeal = self.get_object()
+        user = request.user
+        if not (getattr(user, "is_academic_officer", False) or getattr(user, "is_super_admin", False) or user.is_staff or user.role in ("admin", "staff", "academic_officer", "super_admin")):
+            return Response({"detail": "Only Academic Officers or Administrators can approve grade appeals."}, status=status.HTTP_403_FORBIDDEN)
+
+        if appeal.status in (GradeAppeal.Status.APPROVED, GradeAppeal.Status.REJECTED):
+            return Response({"error": "invalid_status", "detail": f"Appeal has already been {appeal.status}."}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = GradeAppealReviewSerializer(data={"action": "approve", **request.data})
+        serializer.is_valid(raise_exception=True)
+        final_score = serializer.validated_data.get("final_score")
+        notes = serializer.validated_data.get("notes", "")
+
+        appeal.approve(officer=user, final_score=final_score, notes=notes)
+        return Response(GradeAppealSerializer(appeal).data)
+
+    @action(detail=True, methods=["post"], url_path="reject")
+    def reject(self, request, pk=None):
+        appeal = self.get_object()
+        user = request.user
+        if not (getattr(user, "is_academic_officer", False) or getattr(user, "is_super_admin", False) or getattr(user, "is_hod", False) or user.is_staff or user.role in ("admin", "staff", "academic_officer", "super_admin", "head_of_department")):
+            return Response({"detail": "Permission denied to reject grade appeals."}, status=status.HTTP_403_FORBIDDEN)
+
+        if appeal.status in (GradeAppeal.Status.APPROVED, GradeAppeal.Status.REJECTED):
+            return Response({"error": "invalid_status", "detail": f"Appeal has already been {appeal.status}."}, status=status.HTTP_400_BAD_REQUEST)
+
+        notes = request.data.get("notes", "")
+        appeal.reject(reviewer=user, notes=notes)
+        return Response(GradeAppealSerializer(appeal).data)
+
+    @action(detail=True, methods=["post"], url_path="endorse")
+    def endorse(self, request, pk=None):
+        appeal = self.get_object()
+        user = request.user
+        if not (getattr(user, "is_instructor_role", False) or getattr(user, "is_hod", False) or user.is_staff or user.role in ("instructor", "lecturer", "head_of_department", "admin", "staff", "academic_officer")):
+            return Response({"detail": "Only instructors or department heads can endorse grade appeals."}, status=status.HTTP_403_FORBIDDEN)
+
+        comment = request.data.get("comment", "") or request.data.get("notes", "")
+        appeal.endorse_hod(hod=user, comment=comment)
+        return Response(GradeAppealSerializer(appeal).data)
+

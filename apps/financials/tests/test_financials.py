@@ -18,6 +18,7 @@ def student_user(db):
         first_name="Kofi",
         last_name="Mensah",
         role="student",
+        is_registered=True,
     )
 
 
@@ -167,7 +168,16 @@ class TestFinancialsAPI:
         assert res.data["statement"]["balance"] == "3100.00"
 
     def test_bank_lookup_and_notify_webhook(self, student_user, fee_structure):
+        from django.conf import settings
         client = APIClient()
+
+        # 0. Bank request without secret should be rejected (401 Unauthorized)
+        unauth_res = client.get(f"/api/v1/financials/bank/lookup/?student_id={student_user.email}")
+        assert unauth_res.status_code == 401
+
+        # Provide bank webhook secret header
+        secret = getattr(settings, "BANK_WEBHOOK_SECRET", "bank-default-secret-key-2026")
+        client.credentials(HTTP_X_BANK_SECRET=secret)
 
         # 1. Bank teller queries student
         lookup_res = client.get(f"/api/v1/financials/bank/lookup/?student_id={student_user.email}")

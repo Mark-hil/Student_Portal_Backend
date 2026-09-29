@@ -1,7 +1,6 @@
-"""Grade serializers — full workflow: lecturer upload, officer review, student view."""
 from decimal import Decimal
 from rest_framework import serializers
-from .models import Grade, GradeBatch, Assignment, SemesterRecord, Transcript, Submission
+from .models import Grade, GradeBatch, Assignment, SemesterRecord, Transcript, Submission, GradeAppeal
 
 
 class SubmissionSerializer(serializers.ModelSerializer):
@@ -183,3 +182,61 @@ class SemesterRecordSerializer(serializers.ModelSerializer):
     def get_transcript_rows(self, obj):
         rows = Transcript.objects.filter(student=obj.student, semester=obj.semester).select_related("course")
         return TranscriptRowSerializer(rows, many=True).data
+
+
+class GradeAppealSerializer(serializers.ModelSerializer):
+    student_name = serializers.CharField(source="student.full_name", read_only=True)
+    student_email = serializers.CharField(source="student.email", read_only=True)
+    student_code = serializers.CharField(source="student.student_id", read_only=True)
+    course_code = serializers.CharField(source="course.code", read_only=True)
+    course_title = serializers.CharField(source="course.title", read_only=True)
+    assignment_title = serializers.CharField(source="grade.assignment.title", read_only=True)
+    reviewer_name = serializers.CharField(source="reviewed_by.full_name", read_only=True)
+
+    class Meta:
+        model = GradeAppeal
+        fields = [
+            "id", "grade", "student", "student_name", "student_email", "student_code",
+            "course", "course_code", "course_title", "assignment_title",
+            "original_score", "suggested_score", "final_score",
+            "reason", "supporting_doc", "status",
+            "lecturer_comment", "hod_comment", "decision_notes",
+            "reviewed_by", "reviewer_name", "reviewed_at",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "id", "student", "course", "original_score", "final_score", "status",
+            "lecturer_comment", "hod_comment", "decision_notes",
+            "reviewed_by", "reviewed_at", "created_at", "updated_at"
+        ]
+
+
+class GradeAppealCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GradeAppeal
+        fields = ["id", "grade", "suggested_score", "reason", "supporting_doc", "original_score", "status", "created_at"]
+        read_only_fields = ["id", "original_score", "status", "created_at"]
+
+    def validate_grade(self, value):
+        user = self.context["request"].user
+        if getattr(user, "is_student_role", False) or getattr(user, "role", "") == "student":
+            if value.student != user:
+                raise serializers.ValidationError("You can only submit an appeal for your own grade.")
+            if not value.is_published:
+                raise serializers.ValidationError("Cannot appeal an unpublished grade.")
+        return value
+
+    def create(self, validated_data):
+        user = self.context["request"].user
+        grade = validated_data["grade"]
+        validated_data["student"] = grade.student if getattr(user, "role", "") != "student" else user
+        validated_data["course"] = grade.assignment.course
+        validated_data["original_score"] = grade.score or Decimal("0")
+        return super().create(validated_data)
+
+
+class GradeAppealReviewSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=["approve", "reject", "endorse"])
+    final_score = serializers.DecimalField(max_digits=6, decimal_places=2, required=False, allow_null=True)
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+

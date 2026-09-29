@@ -20,13 +20,14 @@ from .serializers import (
     BankNotificationRequestSerializer,
     BankStudentLookupSerializer,
 )
+from core.permissions import IsStudentRegistered
 
 User = get_user_model()
 
 
 class StudentStatementView(APIView):
     """GET /api/v1/financials/my-statement/"""
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsStudentRegistered]
 
     def get(self, request):
         statement = BillingService.get_or_create_statement(request.user)
@@ -36,7 +37,7 @@ class StudentStatementView(APIView):
 
 class MoMoPaymentView(APIView):
     """POST /api/v1/financials/pay/momo/"""
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsStudentRegistered]
 
     def post(self, request):
         serializer = MoMoPaymentRequestSerializer(data=request.data)
@@ -63,7 +64,7 @@ class MoMoPaymentView(APIView):
 
 class SubmitBankSlipView(APIView):
     """POST /api/v1/financials/pay/bank-slip/"""
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsStudentRegistered]
 
     def post(self, request):
         serializer = ManualBankSlipRequestSerializer(data=request.data)
@@ -90,7 +91,7 @@ class SubmitBankSlipView(APIView):
 
 class PaymentReceiptPDFView(APIView):
     """GET /api/v1/financials/payments/<id>/receipt/"""
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsStudentRegistered]
 
     def get(self, request, pk):
         payment = get_object_or_404(Payment, pk=pk)
@@ -105,10 +106,42 @@ class PaymentReceiptPDFView(APIView):
         return response
 
 
+class IsBankWebhookAuthorizedOrStaff(permissions.BasePermission):
+    """
+    Validates Bank integration webhook requests:
+    - If user is authenticated as staff or finance officer, allow.
+    - Otherwise, require a valid X-Bank-API-Key or X-Bank-Secret header matching BANK_WEBHOOK_SECRET.
+    """
+    message = "Unauthorized: Invalid or missing Bank API Key / Secret."
+
+    def has_permission(self, request, view):
+        import os
+        from django.conf import settings
+        if request.user and request.user.is_authenticated:
+            if request.user.is_staff or getattr(request.user, "is_super_admin", False) or getattr(request.user, "role", "") in ("finance", "finance-officer", "finance_officer", "admin", "super_admin"):
+                return True
+
+        expected_secret = getattr(settings, "BANK_WEBHOOK_SECRET", None) or os.environ.get("BANK_WEBHOOK_SECRET")
+        provided_key = (
+            request.META.get("HTTP_X_BANK_API_KEY") or
+            request.META.get("HTTP_X_BANK_SECRET") or
+            request.headers.get("X-Bank-API-Key") or
+            request.headers.get("X-Bank-Secret")
+        )
+
+        if expected_secret:
+            return bool(provided_key and provided_key == expected_secret)
+
+        if getattr(settings, "DEBUG", False):
+            return bool(provided_key in ("dev-bank-key", "test-bank-key", "demo-bank-key"))
+
+        return False
+
+
 class BankStudentLookupView(APIView):
     """GET /api/v1/financials/bank/lookup/?student_id=..."""
-    # Open for bank teller system or admin simulation
-    permission_classes = [permissions.AllowAny]
+    # Protected: Requires Bank API Key / Secret or Staff/Finance credentials
+    permission_classes = [IsBankWebhookAuthorizedOrStaff]
 
     def get(self, request):
         student_id_str = request.query_params.get("student_id", "").strip()
@@ -140,8 +173,8 @@ class BankStudentLookupView(APIView):
 
 class BankPaymentNotificationView(APIView):
     """POST /api/v1/financials/bank/notify/"""
-    # Automated Bank Collect Webhook
-    permission_classes = [permissions.AllowAny]
+    # Automated Bank Collect Webhook — strictly verified via API Key / Secret
+    permission_classes = [IsBankWebhookAuthorizedOrStaff]
 
     def post(self, request):
         serializer = BankNotificationRequestSerializer(data=request.data)
@@ -359,7 +392,7 @@ class AdminExportPaymentsView(APIView):
 
 class StudentExportStatementView(APIView):
     """GET /api/v1/financials/statement/export-csv/ — student exports personal statement ledger."""
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsStudentRegistered]
 
     def get(self, request):
         from .exports import export_student_personal_statement_csv

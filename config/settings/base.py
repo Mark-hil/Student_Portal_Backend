@@ -192,6 +192,9 @@ ARKESEL_API_KEY = os.environ.get("ARKESEL_API_KEY", "")
 ARKESEL_SENDER_ID = os.environ.get("ARKESEL_SENDER_ID", "ASDAM")
 ARKESEL_SMS_URL = os.environ.get("ARKESEL_SMS_URL", "https://sms.arkesel.com/api/v2/sms/send")
 
+# ── Financials & Bank Webhook ────────────────────────────────────────────────
+BANK_WEBHOOK_SECRET = os.environ.get("BANK_WEBHOOK_SECRET", "dev-bank-key")
+
 # ── Logging ──────────────────────────────────────────────────────────────────
 LOGGING = {
     "version": 1,

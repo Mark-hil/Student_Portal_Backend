@@ -20,7 +20,8 @@ def student_user(db):
         role=User.Role.STUDENT,
         first_name="Export",
         last_name="Student",
-        student_id="STU-EXP-001"
+        student_id="STU-EXP-001",
+        is_registered=True,
     )
 
 @pytest.fixture

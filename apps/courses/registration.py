@@ -93,17 +93,19 @@ class RegistrationService:
         self._check_capacity(course)
 
     def _check_financial_hold(self):
+        hold = None
         try:
             from apps.financials.models import FinancialHold
             hold = FinancialHold.objects.filter(student=self.student, is_active=True).first()
-            if hold:
-                raise RegistrationError(
-                    "financial_hold",
-                    f"Course registration is restricted due to outstanding semester fee arrears of GH₵ {hold.amount_due:,.2f}. "
-                    "Please settle your balance via Mobile Money or Bank Deposit to clear your registration hold."
-                )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Error checking financial hold for %s: %s", self.student.email, exc)
+
+        if hold:
+            raise RegistrationError(
+                "financial_hold",
+                f"Course registration is restricted due to outstanding semester fee arrears of GH₵ {hold.amount_due:,.2f}. "
+                "Please settle your balance via Mobile Money or Bank Deposit to clear your registration hold."
+            )
 
     def _check_registration_window(self, course: Course):
         semester = course.semester or self.semester
@@ -246,11 +248,16 @@ class RegistrationService:
 
     def _get_active_enrollments(self):
         if self._active_enrollments is None:
-            self._active_enrollments = Enrollment.objects.filter(
+            from django.db.models import Q
+            qs = Enrollment.objects.filter(
                 student=self.student,
                 status=Enrollment.Status.ACTIVE,
-                course__start_date__year=timezone.now().year,
             )
+            if self.semester:
+                qs = qs.filter(Q(course__semester=self.semester) | Q(course__start_date__year=timezone.now().year))
+            else:
+                qs = qs.filter(course__start_date__year=timezone.now().year)
+            self._active_enrollments = qs
         return self._active_enrollments
 
     def _get_semester_credits(self) -> int:

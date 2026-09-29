@@ -24,6 +24,7 @@ def student(db):
         last_name="Doe",
         student_id="STU2025001",
         department="Computer Science",
+        is_registered=True,
     )
 
 @pytest.fixture

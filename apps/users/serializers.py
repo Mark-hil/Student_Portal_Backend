@@ -110,9 +110,23 @@ class RegisterSerializer(serializers.Serializer):
     def validate_role(self, value):
         from .constants import normalize_role, RoleChoice
         norm = normalize_role(value)
-        if norm not in (RoleChoice.STUDENT, RoleChoice.LECTURER):
-            raise serializers.ValidationError("Public registration only allows student or instructor accounts.")
+        if norm != RoleChoice.STUDENT:
+            raise serializers.ValidationError(
+                "Faculty, instructor, and staff accounts cannot be registered publicly. "
+                "Staff credentials are provisioned exclusively by the Academic Affairs Directorate or HR."
+            )
         return norm
+
+    def validate(self, attrs):
+        raise serializers.ValidationError({
+            "detail": (
+                "Direct public student self-registration is disabled for this institution. "
+                "Admitted students must activate their official portal account using their "
+                "Ministry of Health (MOH) PIN and Admission Voucher Serial Number."
+            ),
+            "code": "use_moh_activation",
+            "suggest_activation": True,
+        })
 
     def validate_email(self, value):
         if User.objects.filter(email=value).exists():
@@ -341,6 +355,7 @@ class MultiIdentifierTokenObtainPairSerializer(TokenObtainPairSerializer):
         user = User.objects.filter(
             Q(email__iexact=identifier_clean) |
             Q(student_id__iexact=identifier_clean) |
+            Q(phone=identifier_clean) |
             Q(moh_pin__iexact=identifier_clean)
         ).first()
 
@@ -354,10 +369,17 @@ class MultiIdentifierTokenObtainPairSerializer(TokenObtainPairSerializer):
                 request=request,
                 target_type="User",
                 target_repr=identifier_clean,
-                description=f"Authentication failed: No active account matching identifier '{identifier_clean}'.",
+                description=f"Authentication failed: No account matching identifier '{identifier_clean}'.",
                 metadata={"identifier": identifier_clean},
             )
-            raise serializers.ValidationError({"detail": "No active account found matching the provided credentials."})
+            raise serializers.ValidationError({
+                "detail": (
+                    "No account found matching the provided identifier (Student ID, Email, Phone, or MOH PIN). "
+                    "Please verify your credentials, or if you are a newly admitted student, click 'Register / Activate' to activate your portal account."
+                ),
+                "code": "account_not_found",
+                "suggest_activation": True,
+            })
 
         is_valid = user.check_password(password)
         # Allow initial sign in for un-registered students using their serial_number
@@ -365,6 +387,28 @@ class MultiIdentifierTokenObtainPairSerializer(TokenObtainPairSerializer):
             is_valid = True
 
         if not is_valid:
+            if not user.is_registered:
+                AuditService.log_event(
+                    action="AUTH_LOGIN_FAILED",
+                    category=AuditLog.Category.AUTH,
+                    status=AuditLog.Status.FAILURE,
+                    actor=user,
+                    request=request,
+                    target_type="User",
+                    target_id=str(user.id),
+                    target_repr=f"{user.full_name} ({user.email})",
+                    description=f"Authentication failed: Student account for '{user.email}' exists on roster but is unactivated.",
+                    metadata={"identifier": identifier_clean},
+                )
+                raise serializers.ValidationError({
+                    "detail": (
+                        f"Account for {user.first_name or 'student'} exists on the admission roster but has not been activated. "
+                        "Please click 'Register / Activate' to complete your enrollment with your MOH PIN and Serial Number."
+                    ),
+                    "code": "account_not_activated",
+                    "suggest_activation": True,
+                })
+
             AuditService.log_event(
                 action="AUTH_LOGIN_FAILED",
                 category=AuditLog.Category.AUTH,
@@ -377,7 +421,11 @@ class MultiIdentifierTokenObtainPairSerializer(TokenObtainPairSerializer):
                 description=f"Authentication failed: Invalid credentials for user '{user.email}'.",
                 metadata={"identifier": identifier_clean},
             )
-            raise serializers.ValidationError({"detail": "Invalid password or credentials."})
+            raise serializers.ValidationError({
+                "detail": "Incorrect password. Please verify your credentials or click 'Forgot Password / Reset PIN' to reset your access code.",
+                "code": "invalid_password",
+                "suggest_reset": True,
+            })
 
         if not user.is_active:
             AuditService.log_event(
@@ -392,7 +440,10 @@ class MultiIdentifierTokenObtainPairSerializer(TokenObtainPairSerializer):
                 description=f"Security alert: Login attempt on suspended or inactive account '{user.email}'.",
                 metadata={"identifier": identifier_clean},
             )
-            raise serializers.ValidationError({"detail": "This account is inactive or suspended. Please contact the academic office."})
+            raise serializers.ValidationError({
+                "detail": "This account is currently inactive or suspended. Please contact the Academic Affairs Directorate or IT Helpdesk (academic@asdam.edu.gh).",
+                "code": "account_inactive",
+            })
 
         # Success audit event
         AuditService.log_event(

@@ -336,3 +336,56 @@ class TestDRFPermissionClasses:
         assert filter_res.status_code == 200
         emails = [u["email"] for u in filter_res.data.get("results", filter_res.data)]
         assert super_admin.email in emails
+
+
+@pytest.mark.django_db
+class TestPublicRegistrationRoleLockdown:
+    """Verifies that public registration endpoints strictly prohibit unauthorized role creation."""
+
+    def test_public_registration_rejects_faculty_role(self, api_client):
+        resp = api_client.post("/api/v1/auth/register/", {
+            "first_name": "Rogue",
+            "last_name": "Lecturer",
+            "email": "rogue.lecturer@uniportal.edu",
+            "password": "SecurePassword123!",
+            "role": "instructor",
+        })
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        error_msg = str(resp.data)
+        assert "cannot be registered publicly" in error_msg
+
+    def test_public_registration_rejects_staff_role(self, api_client):
+        resp = api_client.post("/api/v1/auth/register/", {
+            "first_name": "Rogue",
+            "last_name": "Officer",
+            "email": "rogue.staff@uniportal.edu",
+            "password": "SecurePassword123!",
+            "role": "staff",
+        })
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        error_msg = str(resp.data)
+        assert "cannot be registered publicly" in error_msg
+
+    def test_public_registration_rejects_admin_role(self, api_client):
+        resp = api_client.post("/api/v1/auth/register/", {
+            "first_name": "Rogue",
+            "last_name": "Admin",
+            "email": "rogue.admin@uniportal.edu",
+            "password": "SecurePassword123!",
+            "role": "super_admin",
+        })
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        error_msg = str(resp.data)
+        assert "cannot be registered publicly" in error_msg
+
+    def test_public_registration_directs_student_to_moh_activation(self, api_client):
+        resp = api_client.post("/api/v1/auth/register/", {
+            "first_name": "Freshman",
+            "last_name": "Student",
+            "email": "freshman@uniportal.edu",
+            "password": "SecurePassword123!",
+            "role": "student",
+        })
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert resp.data.get("code") == "use_moh_activation"
+        assert "(MOH) PIN" in str(resp.data.get("detail"))

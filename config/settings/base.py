@@ -176,13 +176,15 @@ CLOUDINARY_STORAGE = {
 CLOUDINARY_PROFILE_FOLDER = "uniportal-profile picture"
 
 # ── Email ────────────────────────────────────────────────────────────────────
-EMAIL_BACKEND       = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_BACKEND       = os.environ.get("EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend")
 EMAIL_HOST          = os.environ.get("EMAIL_HOST", "smtp.sendgrid.net")
-EMAIL_PORT          = 587
-EMAIL_USE_TLS       = True
+EMAIL_PORT          = int(os.environ.get("EMAIL_PORT", 587))
+EMAIL_USE_TLS       = os.environ.get("EMAIL_USE_TLS", "True").lower() in ("true", "1", "yes")
+EMAIL_USE_SSL       = os.environ.get("EMAIL_USE_SSL", "False").lower() in ("true", "1", "yes")
 EMAIL_HOST_USER     = os.environ.get("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
-DEFAULT_FROM_EMAIL  = os.environ.get("DEFAULT_FROM_EMAIL", "noreply@university.edu")
+DEFAULT_FROM_EMAIL  = os.environ.get("DEFAULT_FROM_EMAIL", "noreply@asdam.edu.gh")
+EMAIL_TIMEOUT       = int(os.environ.get("EMAIL_TIMEOUT", 10))
 
 # ── Frontend URL ─────────────────────────────────────────────────────────────
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")

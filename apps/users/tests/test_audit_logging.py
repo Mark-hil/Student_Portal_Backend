@@ -112,6 +112,57 @@ class TestAuthenticationAuditLogs:
         assert latest.actor == user
         assert latest.status == AuditLog.Status.SUCCESS
 
+    def test_login_nonexistent_account_returns_informative_error_and_suggestions(self):
+        client = APIClient()
+        resp = client.post("/api/v1/auth/login/", {
+            "email": "ghost.user@asdam.edu.gh",
+            "password": "AnyPassword123!",
+        })
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert resp.data.get("code") == "account_not_found"
+        assert resp.data.get("suggest_activation") is True
+        assert "No account found matching the provided identifier" in str(resp.data.get("detail"))
+
+    def test_login_unactivated_roster_student_returns_activation_notice(self):
+        client = APIClient()
+        User.objects.create_user(
+            email="freshman@asdam.edu.gh",
+            password="TemporaryPassword123!",
+            first_name="Kofi",
+            last_name="Mensah",
+            moh_pin="MOH-NUR-2026-999",
+            serial_number="VCH-999888",
+            is_registered=False,
+            role="student",
+        )
+        resp = client.post("/api/v1/auth/login/", {
+            "email": "MOH-NUR-2026-999",
+            "password": "DifferentPassword123!",
+        })
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert resp.data.get("code") == "account_not_activated"
+        assert resp.data.get("suggest_activation") is True
+        assert "has not been activated" in str(resp.data.get("detail"))
+
+    def test_login_wrong_password_suggests_reset(self):
+        client = APIClient()
+        User.objects.create_user(
+            email="enrolled.student@asdam.edu.gh",
+            password="CorrectPassword123!",
+            first_name="Ama",
+            last_name="Atta",
+            is_registered=True,
+            role="student",
+        )
+        resp = client.post("/api/v1/auth/login/", {
+            "email": "enrolled.student@asdam.edu.gh",
+            "password": "WrongPassword999!",
+        })
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert resp.data.get("code") == "invalid_password"
+        assert resp.data.get("suggest_reset") is True
+        assert "Incorrect password" in str(resp.data.get("detail"))
+
 
 @pytest.mark.django_db
 class TestAuditLogViewSetAndShielding:

@@ -373,12 +373,9 @@ class MultiIdentifierTokenObtainPairSerializer(TokenObtainPairSerializer):
                 metadata={"identifier": identifier_clean},
             )
             raise serializers.ValidationError({
-                "detail": (
-                    "No account found matching the provided identifier (Student ID, Email, Phone, or MOH PIN). "
-                    "Please verify your credentials, or if you are a newly admitted student, click 'Register / Activate' to activate your portal account."
-                ),
+                "detail": "No account found matching the provided credentials (Email, Student ID, or Username). Please check your credentials and try again.",
                 "code": "account_not_found",
-                "suggest_activation": True,
+                "suggest_activation": False,
             })
 
         is_valid = user.check_password(password)

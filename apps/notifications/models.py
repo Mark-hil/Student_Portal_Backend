@@ -103,3 +103,67 @@ class SMSLog(models.Model):
 
     def __str__(self):
         return f"[SMS {self.status}] {self.recipient_phone} ({self.recipient_name or 'N/A'}) - {self.purpose}"
+
+
+class Announcement(models.Model):
+    """
+    Official campus bulletin board notice published by school leadership.
+    Supports targeting all accounts, students, or faculty, with priority pinning
+    and circular document attachments.
+    """
+    class TargetAudience(models.TextChoices):
+        ALL      = "all",      "All Campus Accounts"
+        STUDENTS = "students", "Students Only"
+        FACULTY  = "faculty",  "Lecturers & Faculty"
+        STAFF    = "staff",    "Administrative Staff"
+
+    class Category(models.TextChoices):
+        GENERAL     = "general",     "General Notice"
+        ACADEMIC    = "academic",    "Academic Circular"
+        EXAMINATION = "examination", "Examination Notice"
+        FINANCIAL   = "financial",   "Bursary & Fee Deadline"
+        EMERGENCY   = "emergency",   "Urgent Campus Alert"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=255)
+    content = models.TextField()
+    category = models.CharField(
+        max_length=30,
+        choices=Category.choices,
+        default=Category.GENERAL,
+        db_index=True,
+    )
+    target_audience = models.CharField(
+        max_length=30,
+        choices=TargetAudience.choices,
+        default=TargetAudience.ALL,
+        db_index=True,
+    )
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="announcements",
+    )
+    author_name = models.CharField(max_length=150, blank=True)
+    author_role = models.CharField(max_length=50, blank=True)
+    is_pinned = models.BooleanField(default=False, db_index=True)
+    is_published = models.BooleanField(default=True, db_index=True)
+    attachment_url = models.URLField(blank=True)
+    attachment_name = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "announcements"
+        ordering = ["-is_pinned", "-created_at"]
+        indexes = [
+            models.Index(fields=["is_published", "target_audience", "created_at"]),
+            models.Index(fields=["category", "is_published"]),
+        ]
+
+    def __str__(self):
+        pinned = "[PINNED] " if self.is_pinned else ""
+        return f"{pinned}[{self.get_category_display()}] {self.title}"
+

@@ -167,8 +167,11 @@ class TestFinancialsAPI:
         assert res.data["payment"]["receipt_number"].startswith("RCP-GHS-")
         assert res.data["statement"]["balance"] == "3100.00"
 
-    def test_bank_lookup_and_notify_webhook(self, student_user, fee_structure):
+    def test_bank_lookup_and_notify_webhook(self, student_user, fee_structure, monkeypatch):
         from django.conf import settings
+        secret = "bank-test-secret-key-2026"
+        monkeypatch.setattr(settings, "BANK_WEBHOOK_SECRET", secret)
+        monkeypatch.setenv("BANK_WEBHOOK_SECRET", secret)
         client = APIClient()
 
         # 0. Bank request without secret should be rejected (401 Unauthorized)
@@ -176,7 +179,6 @@ class TestFinancialsAPI:
         assert unauth_res.status_code == 401
 
         # Provide bank webhook secret header
-        secret = getattr(settings, "BANK_WEBHOOK_SECRET", "bank-default-secret-key-2026")
         client.credentials(HTTP_X_BANK_SECRET=secret)
 
         # 1. Bank teller queries student

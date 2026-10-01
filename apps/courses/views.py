@@ -15,6 +15,10 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
 
+from decimal import Decimal
+from django.http import HttpResponse
+from rest_framework.views import APIView
+
 from .models import Course, Lesson, Enrollment, Category, RegistrationWindow
 from .serializers import (
     CourseListSerializer, CourseDetailSerializer,
@@ -23,6 +27,8 @@ from .serializers import (
     DropEnrollmentSerializer, LessonSerializer,
 )
 from .registration import RegistrationService, RegistrationError
+from .exam_slip_pdf import build_exam_slip_pdf
+from apps.financials.models import FinancialHold, StudentAccountStatement
 from core.permissions import IsInstructor, IsAdminOrReadOnly, IsAdminOrStaff, IsStudentRegistered
 from core.pagination import StandardResultsPagination, CursorPagination
 
@@ -687,3 +693,120 @@ class EnrollmentViewSet(
         page = self.paginate_queryset(qs)
         serializer = self.get_serializer(page, many=True)
         return self.get_paginated_response(serializer.data)
+
+
+# ── Examination Clearance Slip & Hall Ticket ──────────────────────────────────
+
+class ExamClearanceStatusView(APIView):
+    """
+    Returns real-time examination eligibility status for the authenticated student.
+    Checks financial holds, active enrollments, and tuition balance.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        target_student_id = request.query_params.get("student_id")
+
+        if target_student_id and (
+            user.is_staff
+            or user.is_superuser
+            or getattr(user, "role", "") in ("super_admin", "academic_officer", "head_of_department", "finance")
+        ):
+            from apps.users.models import User
+            student = User.objects.filter(Q(id=target_student_id) | Q(student_id=target_student_id)).first()
+            if not student:
+                return Response({"detail": "Student not found."}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            student = user
+
+        active_holds = FinancialHold.objects.filter(student=student, is_active=True)
+        has_hold = active_holds.exists()
+
+        statement = StudentAccountStatement.objects.filter(student=student).order_by("-created_at").first()
+        balance = statement.balance if statement else Decimal("0.00")
+
+        enrollments = Enrollment.objects.filter(
+            student=student, status=Enrollment.Status.ACTIVE
+        ).select_related("course")
+
+        reg_count = enrollments.count()
+        total_credits = sum(e.course.credits or 3 for e in enrollments)
+        is_eligible = (not has_hold) and (reg_count > 0)
+
+        hold_obj = active_holds.first()
+        return Response({
+            "is_eligible": is_eligible,
+            "has_financial_hold": has_hold,
+            "hold_reason": hold_obj.reason if hold_obj else None,
+            "hold_amount": str(hold_obj.amount_due) if hold_obj else "0.00",
+            "balance": str(balance),
+            "registered_courses_count": reg_count,
+            "total_credits": total_credits,
+            "semester": statement.semester if statement else "2024/2025 Academic Year",
+            "student_id": student.student_id or "",
+            "student_name": student.full_name or student.email,
+            "program": student.get_program_display() if hasattr(student, "get_program_display") else (student.program or "Nursing"),
+            "class_name": student.class_name or "100",
+        })
+
+
+class ExamClearancePDFView(APIView):
+    """
+    Renders and streams the official 1-page Examination Clearance Slip & Hall Ticket PDF.
+    Enforces strict zero-active-hold and registered course validation.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        target_student_id = request.query_params.get("student_id")
+
+        if target_student_id and (
+            user.is_staff
+            or user.is_superuser
+            or getattr(user, "role", "") in ("super_admin", "academic_officer", "head_of_department", "finance")
+        ):
+            from apps.users.models import User
+            student = User.objects.filter(Q(id=target_student_id) | Q(student_id=target_student_id)).first()
+            if not student:
+                return Response({"detail": "Student not found."}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            student = user
+
+        # 1. Enforce zero financial hold
+        active_holds = FinancialHold.objects.filter(student=student, is_active=True)
+        if active_holds.exists():
+            hold = active_holds.first()
+            return Response(
+                {"detail": f"Examination clearance blocked: {hold.reason} (Arrears: GH₵ {hold.amount_due:,.2f})"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # 2. Enforce active enrollments
+        enrollments = list(
+            Enrollment.objects.filter(student=student, status=Enrollment.Status.ACTIVE)
+            .select_related("course")
+            .prefetch_related("course__schedules")
+            .order_by("course__code")
+        )
+
+        if not enrollments:
+            return Response(
+                {"detail": "No active course enrollments found for current semester. Cannot issue examination clearance slip."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        statement = StudentAccountStatement.objects.filter(student=student).order_by("-created_at").first()
+        clearance_info = {
+            "semester": statement.semester if statement else "2024/2025 Academic Year",
+            "balance": statement.balance if statement else Decimal("0.00"),
+            "reference": f"EXAM-{student.student_id or 'STU'}-{timezone.now().strftime('%Y%m')}",
+        }
+
+        pdf_buffer = build_exam_slip_pdf(student, enrollments, clearance_info)
+        filename = f"Exam_Docket_{student.student_id or student.id}.pdf"
+        response = HttpResponse(pdf_buffer.getvalue(), content_type="application/pdf")
+        response["Content-Disposition"] = f'inline; filename="{filename}"'
+        return response
+

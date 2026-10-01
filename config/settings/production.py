@@ -6,7 +6,7 @@ from .base import *  # noqa: F401, F403
 
 DEBUG = False
 ALLOWED_HOSTS = [host.strip() for host in os.environ.get("ALLOWED_HOSTS", "").split(",") if host.strip()]
-for default_host in ("localhost", "127.0.0.1", "0.0.0.0", "api", "nginx"):
+for default_host in ("localhost", "127.0.0.1", "0.0.0.0", "api", "nginx", "testserver"):
     if default_host not in ALLOWED_HOSTS:
         ALLOWED_HOSTS.append(default_host)
 

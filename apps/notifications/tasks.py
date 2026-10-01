@@ -110,7 +110,7 @@ def dispatch_welcome_notifications(user_id: str, raw_password: str):
     email_subject = f"Welcome to ASDAM Student Portal — Your Login Credentials [{student_id}]"
     text_email = (
         f"Dear {full_name},\n\n"
-        f"Welcome to Arch-Bishop Porter College of Health & Allied Sciences (ASDAM)!\n"
+        f"Welcome to S.D.A NMTC Asamang - Agona (ASDAM)!\n"
         f"Your official student portal account has been created.\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"YOUR PORTAL LOGIN CREDENTIALS\n"
@@ -163,7 +163,7 @@ def dispatch_welcome_notifications(user_id: str, raw_password: str):
       <div class="card">
         <div class="header">
           <h1>ASDAM Student Portal</h1>
-          <p>Arch-Bishop Porter College of Health & Allied Sciences</p>
+          <p>S.D.A NMTC Asamang - Agona</p>
         </div>
         <div class="content">
           <p style="font-size: 15px; margin-top: 0;">Dear <strong>{full_name}</strong>,</p>

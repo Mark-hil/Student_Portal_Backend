@@ -37,8 +37,8 @@ class Migration(migrations.Migration):
                 'db_table': 'announcements',
                 'ordering': ['-is_pinned', '-created_at'],
                 'indexes': [
-                    models.Index(fields=['is_published', 'target_audience', 'created_at'], name='announcemen_is_publ_56f8a4_idx'),
-                    models.Index(fields=['category', 'is_published'], name='announcemen_categor_60f878_idx'),
+                    models.Index(fields=['is_published', 'target_audience', 'created_at'], name='announcemen_is_publ_a9fce8_idx'),
+                    models.Index(fields=['category', 'is_published'], name='announcemen_categor_ce5529_idx'),
                 ],
             },
         ),

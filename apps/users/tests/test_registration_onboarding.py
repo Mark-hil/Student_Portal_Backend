@@ -42,7 +42,8 @@ class TestRegistrationOnboardingFlow:
         assert normalize_arkesel_phone("0241234567") == "233241234567"
         assert normalize_arkesel_phone("+233241234567") == "233241234567"
 
-    def test_send_sms_simulation(self):
+    def test_send_sms_simulation(self, monkeypatch):
+        monkeypatch.setenv("SMS_SIMULATION_MODE", "1")
         res = send_sms(phone="0241234567", message="Hello from ASDAM", sender_id="ASDAM")
         assert res["success"] is True
         assert res["phone"] == "+233241234567"

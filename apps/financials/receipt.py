@@ -132,7 +132,7 @@ class PaymentReceiptGenerator:
         story = []
 
         # ── Header ──────────────────────────────────────────────────────────
-        story.append(Paragraph("UNIPORTAL UNIVERSITY · GHANA", self.styles["UniHeader"]))
+        story.append(Paragraph("S.D.A NMTC Asamang - Agona· GHANA", self.styles["UniHeader"]))
         story.append(Paragraph("DIRECTORATE OF FINANCE & STUDENT ACCOUNTS", self.styles["UniSubheader"]))
         story.append(Spacer(1, 4))
         story.append(Paragraph("OFFICIAL STUDENT FEE PAYMENT RECEIPT", self.styles["ReceiptTitle"]))

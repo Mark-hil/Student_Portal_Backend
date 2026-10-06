@@ -41,3 +41,5 @@ celerybeat-schedule.db.dir
 *.swo
 .DS_Store
 Thumbs.db
+
+DEMO_ACCOUNTS.md

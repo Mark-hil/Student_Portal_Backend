@@ -127,12 +127,14 @@ def seed():
             "department": "Computer Science",
             "bio": "Third-year undergraduate student focusing on Software Engineering and Artificial Intelligence.",
             "email_verified": True,
+            "is_registered": True,
         }
     )
     student.set_password("password123")
     student.role = "student"
     student.student_id = "STU-2024-8891"
     student.department = "Computer Science"
+    student.is_registered = True
     student.save()
 
     student2, _ = User.objects.get_or_create(
@@ -144,11 +146,13 @@ def seed():
             "student_id": "STU-2024-8892",
             "department": "Computer Science",
             "email_verified": True,
+            "is_registered": True,
         }
     )
     student2.set_password("password123")
     student2.role = "student"
     student2.student_id = "STU-2024-8892"
+    student2.is_registered = True
     student2.save()
 
     student3, _ = User.objects.get_or_create(
@@ -160,11 +164,13 @@ def seed():
             "student_id": "STU-2024-8893",
             "department": "Data Science",
             "email_verified": True,
+            "is_registered": True,
         }
     )
     student3.set_password("password123")
     student3.role = "student"
     student3.student_id = "STU-2024-8893"
+    student3.is_registered = True
     student3.save()
 
     # ── 2. REGISTRATION WINDOWS ──────────────────────────────────────────────
@@ -604,6 +610,43 @@ def seed():
     recompute_student_gpas(student, "2024-SPRING", "Spring 2024")
     recompute_student_gpas(student, "2024-FALL", "Fall 2024")
     res_curr = recompute_student_gpas(student, "2025-SPRING", "Spring 2025")
+
+    # ── 10. SEED FINANCIAL STATEMENT AND CLEARED FEES FOR DEMO STUDENT ────────
+    try:
+        from apps.financials.models import StudentAccountStatement, Payment, FinancialHold
+        stmt, _ = StudentAccountStatement.objects.get_or_create(
+            student=student,
+            semester="2025-SPRING",
+            defaults={
+                "academic_level": "300",
+                "academic_fee": Decimal("4500.00"),
+                "ict_library_fee": Decimal("350.00"),
+                "src_dues": Decimal("150.00"),
+                "examination_fee": Decimal("200.00"),
+                "total_billed": Decimal("5200.00"),
+                "total_paid": Decimal("5200.00"),
+                "balance": Decimal("0.00"),
+                "status": StudentAccountStatement.Status.PAID,
+            }
+        )
+        stmt.total_paid = stmt.total_billed
+        stmt.balance = Decimal("0.00")
+        stmt.status = StudentAccountStatement.Status.PAID
+        stmt.save()
+
+        Payment.objects.get_or_create(
+            statement=stmt,
+            reference="PAY-MOMO-DEMO-2025",
+            defaults={
+                "amount": stmt.total_billed,
+                "channel": Payment.Channel.MOMO,
+                "status": Payment.Status.COMPLETED,
+                "provider_ref": "TXN-DEMO-001928",
+            }
+        )
+        FinancialHold.objects.filter(student=student).update(is_active=False)
+    except Exception as e:
+        print(f"Notice: Financial seed step ({e})")
 
     # Clear Django cache
     from django.core.cache import cache

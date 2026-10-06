@@ -553,22 +553,30 @@ class GradeViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="transcript/pdf")
     def transcript_pdf(self, request):
-        """Generates downloadable unofficial transcript PDF with watermark."""
-        # Enforce financial hold check for students
+        """
+        Generates downloadable academic transcript PDF.
+        - If student has fee arrears / active financial hold, an Unofficial Advisory Transcript is generated.
+        - If fees are cleared, an Official Certified Transcript with Seal & Registrar Signature is generated.
+        """
+        is_official = True
+        hold_info = None
+
         if getattr(request.user, "is_student_role", False) or getattr(request.user, "role", "") == "student":
             try:
                 from apps.financials.models import FinancialHold
                 hold = FinancialHold.objects.filter(student=request.user, is_active=True).first()
                 if hold:
-                    return Response(
-                        {
-                            "error": "financial_hold",
-                            "detail": f"Official academic transcript is withheld due to outstanding semester fee arrears of GH₵ {hold.amount_due:,.2f}. Please settle your balance via Student Financials."
-                        },
-                        status=status.HTTP_403_FORBIDDEN
-                    )
+                    is_official = False
+                    hold_info = {
+                        "amount_due": hold.amount_due,
+                        "reason": hold.reason,
+                    }
             except Exception:
                 pass
+
+        # Allow explicitly requesting unofficial copy via query parameter (?type=unofficial)
+        if request.query_params.get("type", "").lower() == "unofficial":
+            is_official = False
 
         from django.http import HttpResponse
         from .pdf import build_transcript_pdf
@@ -602,10 +610,20 @@ class GradeViewSet(viewsets.ReadOnlyModelViewSet):
             "cumulative_quality_points": str(current_rec.cumulative_quality_points) if current_rec and current_rec.cumulative_quality_points else "—",
         }
 
-        pdf_buffer = build_transcript_pdf(request.user, semesters_list, cumulative_stats)
+        pdf_buffer = build_transcript_pdf(
+            request.user,
+            semesters_list,
+            cumulative_stats,
+            is_official=is_official,
+            hold_info=hold_info,
+        )
         student_id_str = request.user.student_id or str(request.user.id)[:8]
+        prefix = "official" if is_official else "unofficial"
         response = HttpResponse(pdf_buffer.getvalue(), content_type="application/pdf")
-        response["Content-Disposition"] = f'inline; filename="unofficial_transcript_{student_id_str}.pdf"'
+        response["Content-Disposition"] = f'inline; filename="{prefix}_transcript_{student_id_str}.pdf"'
+        response["X-Transcript-Official"] = "true" if is_official else "false"
+        if hold_info:
+            response["X-Financial-Hold"] = str(hold_info["amount_due"])
         return response
 
     @action(detail=False, methods=["get"], url_path="course-summary")

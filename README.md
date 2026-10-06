@@ -1,6 +1,6 @@
 # UniPortal — Backend API
 
-The backend API for the UniPortal University Management & Student Information System, built with **Django 5 + Django REST Framework**, **Neon Serverless PostgreSQL**, **Cloudinary**, and **Celery**.
+The backend API for the S.D.A NMTC Asamang - AgonaManagement & Student Information System, built with **Django 5 + Django REST Framework**, **Neon Serverless PostgreSQL**, **Cloudinary**, and **Celery**.
 
 ---
 

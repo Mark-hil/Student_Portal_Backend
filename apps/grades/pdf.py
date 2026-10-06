@@ -23,11 +23,14 @@ from reportlab.graphics.barcode import qr
 class TranscriptCanvas(canvas.Canvas):
     """
     Two-pass canvas that applies:
-    - Official dual security border in College Forest Green & Academic Gold
-    - High-elegance diagonal security watermark
+    - Official dual security border in College Forest Green & Academic Gold (or Amber for Unofficial)
+    - High-elegance diagonal security watermark (Official vs Unofficial Student Advisory)
     - Microprint security running header
     - Verified document footer with dynamic 'Page X of Y' pagination
     """
+    is_official: bool = True
+    hold_info: dict = None
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._saved_page_states = []
@@ -49,37 +52,68 @@ class TranscriptCanvas(canvas.Canvas):
         w, h = letter
 
         # ── 1. Dual Security Outer Border ─────────────────────────────────────
-        # Outer primary border (Deep Forest Green)
-        self.setStrokeColor(colors.HexColor("#064e3b"))
-        self.setLineWidth(1.5)
-        self.rect(22, 22, w - 44, h - 44)
+        if self.is_official:
+            self.setStrokeColor(colors.HexColor("#064e3b"))
+            self.setLineWidth(1.5)
+            self.rect(22, 22, w - 44, h - 44)
 
-        # Inner hairline border (Academic Gold)
-        self.setStrokeColor(colors.HexColor("#ca8a04"))
-        self.setLineWidth(0.6)
-        self.rect(25, 25, w - 50, h - 50)
+            self.setStrokeColor(colors.HexColor("#ca8a04"))
+            self.setLineWidth(0.6)
+            self.rect(25, 25, w - 50, h - 50)
+        else:
+            self.setStrokeColor(colors.HexColor("#b45309"))
+            self.setLineWidth(1.5)
+            self.rect(22, 22, w - 44, h - 44)
+
+            self.setStrokeColor(colors.HexColor("#94a3b8"))
+            self.setLineWidth(0.6)
+            self.rect(25, 25, w - 50, h - 50)
 
         # ── 2. Diagonal Security Watermark ────────────────────────────────────
         self.saveState()
-        self.setFont("Helvetica-Bold", 38)
-        try:
-            self.setFillColor(colors.HexColor("#064e3b"), alpha=0.035)
-        except Exception:
-            self.setFillColor(colors.HexColor("#f1f5f9"))
-        self.translate(w / 2.0, h / 2.0)
-        self.rotate(36)
-        self.drawCentredString(0, 40, "OFFICIAL ACADEMIC RECORD")
-        self.drawCentredString(0, -15, "S.D.A NMTC ASAMANG - AGONA")
+        if self.is_official:
+            self.setFont("Helvetica-Bold", 42)
+            try:
+                self.setFillColor(colors.HexColor("#064e3b"), alpha=0.13)
+            except Exception:
+                self.setFillColor(colors.HexColor("#cbd5e1"))
+            self.translate(w / 2.0, h / 2.0)
+            self.rotate(36)
+            self.drawCentredString(0, 45, "OFFICIAL ACADEMIC RECORD")
+            self.drawCentredString(0, -10, "S.D.A NMTC ASAMANG - AGONA")
+            self.setFont("Helvetica-Bold", 18)
+            self.drawCentredString(0, -45, "VALID ONLY WITH EMBOSSED SEAL")
+        else:
+            self.setFont("Helvetica-Bold", 44)
+            try:
+                self.setFillColor(colors.HexColor("#d97706"), alpha=0.18)
+            except Exception:
+                self.setFillColor(colors.HexColor("#fed7aa"))
+            self.translate(w / 2.0, h / 2.0)
+            self.rotate(36)
+            self.drawCentredString(0, 45, "UNOFFICIAL TRANSCRIPT")
+            self.setFont("Helvetica-Bold", 26)
+            self.drawCentredString(0, 5, "STUDENT ADVISORY COPY ONLY")
+            self.setFont("Helvetica-Bold", 16)
+            self.drawCentredString(0, -30, "NOT FOR OFFICIAL OR TRANSFER USE")
         self.restoreState()
 
         # ── 3. Microprint Top Security Header ──────────────────────────────────
         self.setFont("Helvetica-Bold", 7)
-        self.setFillColor(colors.HexColor("#064e3b"))
-        self.drawCentredString(
-            w / 2.0,
-            h - 18,
-            "••• S.D.A. NURSING & MIDWIFERY TRAINING COLLEGE • OFFICIAL TRANSCRIPT OF ACADEMIC RECORD •••"
-        )
+        if self.is_official:
+            self.setFillColor(colors.HexColor("#064e3b"))
+            self.drawCentredString(
+                w / 2.0,
+                h - 18,
+                "••• S.D.A. NURSING & MIDWIFERY TRAINING COLLEGE • OFFICIAL TRANSCRIPT OF ACADEMIC RECORD •••"
+            )
+        else:
+            self.setFillColor(colors.HexColor("#b45309"))
+            self.drawCentredString(
+                w / 2.0,
+                h - 18,
+                "••• S.D.A. NURSING & MIDWIFERY TRAINING COLLEGE • UNOFFICIAL STUDENT ADVISORY RECORD •••"
+            )
 
         # ── 4. Official Footer & Verification Banner ──────────────────────────
         self.setStrokeColor(colors.HexColor("#cbd5e1"))
@@ -89,11 +123,11 @@ class TranscriptCanvas(canvas.Canvas):
         self.setFont("Helvetica", 7.5)
         self.setFillColor(colors.HexColor("#475569"))
         timestamp = timezone.now().strftime("%d-%b-%Y %H:%M UTC")
-        self.drawString(
-            34,
-            28,
-            f"Official Academic Dossier • Issued {timestamp} • portal.asdam.edu.gh/verify"
-        )
+        if self.is_official:
+            footer_text = f"Official Academic Dossier • Issued {timestamp} • portal.asdam.edu.gh/verify"
+        else:
+            footer_text = f"Unofficial Student Copy • Issued {timestamp} • Clear Arrears at Student Financials for Official Record"
+        self.drawString(34, 28, footer_text)
         self.drawRightString(w - 34, 28, f"Page {self._pageNumber} of {total_pages}")
 
         self.restoreState()
@@ -119,11 +153,17 @@ def get_degree_classification(gpa_val) -> str:
         return "In Progress"
 
 
-def build_transcript_pdf(student, semesters_data: list, cumulative_stats: dict) -> io.BytesIO:
+def build_transcript_pdf(
+    student,
+    semesters_data: list,
+    cumulative_stats: dict,
+    is_official: bool = True,
+    hold_info: dict = None,
+) -> io.BytesIO:
     """
     Generates a high-fidelity, publication-grade academic transcript PDF for a student.
-    Includes institutional header, verification QR, bio data card, course ledger tables,
-    cumulative classification, grading key, and registrar signature block.
+    Supports official certified records as well as unofficial student advisory copies
+    when financial fee arrears exist.
     """
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -251,11 +291,29 @@ def build_transcript_pdf(student, semesters_data: list, cumulative_stats: dict) 
     story.append(
         Paragraph("Affiliated to the University of Cape Coast (UCC) • Regulated by the Nursing & Midwifery Council of Ghana (NMC)", inst_affil)
     )
-    story.append(Spacer(1, 3))
-    story.append(Paragraph("OFFICE OF THE REGISTRAR • OFFICIAL ACADEMIC TRANSCRIPT", doc_heading))
+    if is_official:
+        story.append(Paragraph("OFFICE OF THE REGISTRAR • OFFICIAL ACADEMIC TRANSCRIPT", doc_heading))
+    else:
+        doc_heading_unoff = ParagraphStyle(
+            "DocHeadingUnoff",
+            parent=doc_heading,
+            textColor=colors.HexColor("#9a3412"),
+            fontSize=10.5,
+            leading=13,
+        )
+        story.append(Paragraph("STUDENT ADVISORY RECORD • UNOFFICIAL ACADEMIC TRANSCRIPT", doc_heading_unoff))
+        if hold_info and hold_info.get("amount_due"):
+            story.append(Spacer(1, 1))
+            story.append(
+                Paragraph(
+                    f"<b>NOTICE:</b> Official certified copy withheld due to semester fee balance of GH¢ {float(hold_info['amount_due']):,.2f}. Clear balance at Student Financials.",
+                    ParagraphStyle("HoldNotice", fontName="Helvetica-Bold", fontSize=6.8, leading=8.5, textColor=colors.HexColor("#b91c1c"), alignment=1)
+                )
+            )
+
     story.append(Spacer(1, 4))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=c_primary, spaceAfter=1.5, spaceBefore=0))
-    story.append(HRFlowable(width="100%", thickness=0.75, color=c_gold, spaceAfter=7, spaceBefore=0))
+    story.append(HRFlowable(width="100%", thickness=1.5, color=c_primary if is_official else colors.HexColor("#b45309"), spaceAfter=1.5, spaceBefore=0))
+    story.append(HRFlowable(width="100%", thickness=0.75, color=c_gold if is_official else colors.HexColor("#94a3b8"), spaceAfter=7, spaceBefore=0))
 
     # ── 2. Document Serial & Verification QR Code ──────────────────────────────
     student_id = student.student_id or "UNASSIGNED"
@@ -265,11 +323,13 @@ def build_transcript_pdf(student, semesters_data: list, cumulative_stats: dict) 
     total_cr_attempted = cumulative_stats.get("cumulative_credits_attempted", total_cr_earned)
     total_qp = cumulative_stats.get("cumulative_quality_points", "0.00")
 
-    doc_ref = f"ASDAM-TR-{uuid.uuid4().hex[:8].upper()}"
+    prefix_code = "ASDAM-TR" if is_official else "ASDAM-UNOFF"
+    doc_ref = f"{prefix_code}-{uuid.uuid4().hex[:8].upper()}"
     date_issued = timezone.now().strftime("%B %d, %Y")
 
+    status_tag = "OFFICIAL-CERTIFIED" if is_official else "UNOFFICIAL-ADVISORY"
     qr_payload = (
-        f"ASDAM-TRANSCRIPT-VERIFIED|DOC:{doc_ref}|ID:{student_id}|"
+        f"ASDAM-TRANSCRIPT-{status_tag}|DOC:{doc_ref}|ID:{student_id}|"
         f"NAME:{full_name}|CGPA:{cum_gpa}|CREDITS:{total_cr_earned}|DATE:{timezone.now().strftime('%Y%m%d')}"
     )
     qr_widget = qr.QrCodeWidget(qr_payload)
@@ -298,6 +358,14 @@ def build_transcript_pdf(student, semesters_data: list, cumulative_stats: dict) 
 
     classification = get_degree_classification(cum_gpa)
 
+    if is_official:
+        standing_str = "<font color='#047857'><b>Good Standing • Certified</b></font>"
+    else:
+        if hold_info and hold_info.get("amount_due"):
+            standing_str = f"<font color='#dc2626'><b>Unofficial • Fee Arrears (GH¢ {float(hold_info['amount_due']):,.2f})</b></font>"
+        else:
+            standing_str = "<font color='#b45309'><b>Unofficial Record • Advisory Copy</b></font>"
+
     # Meta card table (2 columns of bio data + right QR code)
     bio_table_data = [
         [
@@ -318,7 +386,7 @@ def build_transcript_pdf(student, semesters_data: list, cumulative_stats: dict) 
             Paragraph("<b>MOH / Nursing PIN:</b>", lbl_bold),
             Paragraph(f"{moh_pin}", val_norm),
             Paragraph("<b>Document Serial Ref:</b>", lbl_bold),
-            Paragraph(f"<font color='#064e3b'><b>{doc_ref}</b></font>", val_norm),
+            Paragraph(f"<font color='{'#064e3b' if is_official else '#9a3412'}'><b>{doc_ref}</b></font>", val_norm),
             "",
         ],
         [
@@ -332,7 +400,7 @@ def build_transcript_pdf(student, semesters_data: list, cumulative_stats: dict) 
             Paragraph("<b>Date of Issue:</b>", lbl_bold),
             Paragraph(f"{date_issued}", val_norm),
             Paragraph("<b>Academic Standing:</b>", lbl_bold),
-            Paragraph("<font color='#047857'><b>Good Standing • Certified</b></font>", val_norm),
+            Paragraph(standing_str, val_norm),
             "",
         ],
     ]
@@ -562,34 +630,66 @@ def build_transcript_pdf(student, semesters_data: list, cumulative_stats: dict) 
     story.append(Spacer(1, 4.5))
 
     # ── 6. Official Registrar Authentication & Sign-Off Block ─────────────────
-    sign_data = [
-        [
-            Paragraph("<b>ACADEMIC AFFAIRS OFFICER</b><br/><br/>___________________________________<br/><b>Registrar / Examinations Officer</b><br/>Signature & Date", ParagraphStyle("SignL", parent=val_norm, alignment=1, fontSize=6.8, leading=8.5)),
-            Paragraph(
-                "<font color='#064e3b'><b>S.D.A. NMTC ASAMANG</b></font><br/>"
-                "<font color='#ca8a04'><b>[ OFFICIAL EMBOSSED SEAL ]</b></font><br/>"
-                "Certified Academic Record",
-                ParagraphStyle("SignC", parent=val_norm, alignment=1, fontSize=6.8, leading=8.5)
-            ),
-            Paragraph("<b>DEAN / HEAD OF INSTITUTION</b><br/><br/>___________________________________<br/><b>Principal / Academic Board</b><br/>Signature & Date", ParagraphStyle("SignR", parent=val_norm, alignment=1, fontSize=6.8, leading=8.5)),
+    if is_official:
+        sign_data = [
+            [
+                Paragraph("<b>ACADEMIC AFFAIRS OFFICER</b><br/><br/>___________________________________<br/><b>Registrar / Examinations Officer</b><br/>Signature & Date", ParagraphStyle("SignL", parent=val_norm, alignment=1, fontSize=6.8, leading=8.5)),
+                Paragraph(
+                    "<font color='#064e3b'><b>S.D.A. NMTC ASAMANG</b></font><br/>"
+                    "<font color='#ca8a04'><b>[ OFFICIAL EMBOSSED SEAL ]</b></font><br/>"
+                    "Certified Academic Record",
+                    ParagraphStyle("SignC", parent=val_norm, alignment=1, fontSize=6.8, leading=8.5)
+                ),
+                Paragraph("<b>DEAN / HEAD OF INSTITUTION</b><br/><br/>___________________________________<br/><b>Principal / Academic Board</b><br/>Signature & Date", ParagraphStyle("SignR", parent=val_norm, alignment=1, fontSize=6.8, leading=8.5)),
+            ]
         ]
-    ]
-    sign_table = Table(sign_data, colWidths=[2.65 * inch, 2.4 * inch, 2.65 * inch])
-    sign_table.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
-        ("BACKGROUND", (1, 0), (1, 0), colors.HexColor("#f0fdf4")),
-        ("LINEBEFORE", (1, 0), (1, -1), 0.5, colors.HexColor("#cbd5e1")),
-        ("LINEBEFORE", (2, 0), (2, -1), 0.5, colors.HexColor("#cbd5e1")),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ("LEFTPADDING", (0, 0), (-1, -1), 8),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-    ]))
+        sign_table = Table(sign_data, colWidths=[2.65 * inch, 2.4 * inch, 2.65 * inch])
+        sign_table.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+            ("BACKGROUND", (1, 0), (1, 0), colors.HexColor("#f0fdf4")),
+            ("LINEBEFORE", (1, 0), (1, -1), 0.5, colors.HexColor("#cbd5e1")),
+            ("LINEBEFORE", (2, 0), (2, -1), 0.5, colors.HexColor("#cbd5e1")),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ]))
+    else:
+        arrears_txt = f"due to fee arrears of GH¢ {float(hold_info['amount_due']):,.2f}" if hold_info and hold_info.get('amount_due') else "for student advising only"
+        sign_data = [
+            [
+                Paragraph(
+                    "<b>UNOFFICIAL ACADEMIC RECORD • STUDENT ADVISORY COPY</b><br/>"
+                    f"This document is issued {arrears_txt}. "
+                    "It does not bear the official signature of the Registrar or the embossed seal of the College. "
+                    "This record is invalid for transfer of credit, employment verification, or credential assessment. "
+                    "To obtain an Official Academic Transcript, students must resolve any outstanding fee arrears through Student Financials.",
+                    ParagraphStyle("UnofficialNotice", parent=val_norm, alignment=1, fontSize=6.8, leading=8.5, textColor=colors.HexColor("#92400e"))
+                )
+            ]
+        ]
+        sign_table = Table(sign_data, colWidths=[7.7 * inch])
+        sign_table.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#f59e0b")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fffbeb")),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ]))
     story.append(KeepTogether([sign_table]))
 
-    # Build the PDF using our custom security canvas
-    doc.build(story, canvasmaker=TranscriptCanvas)
+    # Build the PDF using our custom security canvas with dynamic official/unofficial state
+    class ConfiguredCanvas(TranscriptCanvas):
+        pass
+
+    ConfiguredCanvas.is_official = is_official
+    ConfiguredCanvas.hold_info = hold_info
+
+    doc.build(story, canvasmaker=ConfiguredCanvas)
     buffer.seek(0)
     return buffer
+

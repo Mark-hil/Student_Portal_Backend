@@ -117,6 +117,27 @@ class TestPDFTranscriptGenerator:
         assert response["Content-Type"] == "application/pdf"
         assert b"%PDF-" in response.content[:10]
         assert len(response.content) > 1000
+        assert response["X-Transcript-Official"] == "true"
+        assert "official_transcript" in response["Content-Disposition"]
+
+    def test_transcript_pdf_with_financial_hold_returns_unofficial_pdf(self, client, student, course, enrollment):
+        from apps.financials.models import FinancialHold
+        FinancialHold.objects.create(
+            student=student,
+            amount_due=Decimal("5200.00"),
+            reason="Outstanding semester fee arrears of GH₵ 5,200.00",
+            is_active=True,
+        )
+
+        client.force_authenticate(user=student)
+        response = client.get("/api/v1/grades/transcript/pdf/")
+        assert response.status_code == 200
+        assert response["Content-Type"] == "application/pdf"
+        assert b"%PDF-" in response.content[:10]
+        assert len(response.content) > 1000
+        assert response["X-Transcript-Official"] == "false"
+        assert response["X-Financial-Hold"] == "5200.00"
+        assert "unofficial_transcript" in response["Content-Disposition"]
 
 
 @pytest.mark.django_db

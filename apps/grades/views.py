@@ -19,6 +19,7 @@ Officer   : GET  /grades/batches/?role=officer  → pending review queue
              PATCH /grades/batches/{id}/publish/ → publish to students
 """
 import logging
+from decimal import Decimal
 from django.db.models import Avg, Count
 from django.core.cache import cache
 from django.utils import timezone
@@ -563,7 +564,7 @@ class GradeViewSet(viewsets.ReadOnlyModelViewSet):
 
         if getattr(request.user, "is_student_role", False) or getattr(request.user, "role", "") == "student":
             try:
-                from apps.financials.models import FinancialHold
+                from apps.financials.models import FinancialHold, StudentAccountStatement
                 hold = FinancialHold.objects.filter(student=request.user, is_active=True).first()
                 if hold:
                     is_official = False
@@ -571,6 +572,14 @@ class GradeViewSet(viewsets.ReadOnlyModelViewSet):
                         "amount_due": hold.amount_due,
                         "reason": hold.reason,
                     }
+                else:
+                    unpaid_stmt = StudentAccountStatement.objects.filter(student=request.user, balance__gt=Decimal("0.00")).order_by("-created_at").first()
+                    if unpaid_stmt and unpaid_stmt.balance > Decimal("0.00"):
+                        is_official = False
+                        hold_info = {
+                            "amount_due": unpaid_stmt.balance,
+                            "reason": f"Outstanding semester fee balance of GH₵ {unpaid_stmt.balance:,.2f}",
+                        }
             except Exception:
                 pass
 

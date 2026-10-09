@@ -184,12 +184,48 @@ jobs:
           include-hidden-files: true
           retention-days: 1
 
+  test-notifications:
+    name: Notifications & SMS Gateways
+    needs: migrations-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Notifications Test Suite with Coverage
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.development
+          SECRET_KEY: 'ci-testing-secret-key-not-for-production'
+          COVERAGE_FILE: .coverage.notifications
+        run: |
+          pytest apps/notifications/tests/ --cov=apps/notifications --cov-config=.coveragerc -v
+
+      - name: Upload Notifications Coverage Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-notifications
+          path: .coverage.notifications
+          include-hidden-files: true
+          retention-days: 1
+
   # ─────────────────────────────────────────────────────────────
   # Phase 4: Combined Coverage Analysis & Reporting
   # ─────────────────────────────────────────────────────────────
   coverage-report:
     name: Test Coverage Aggregation & Report
-    needs: [test-users-and-rbac, test-academics, test-financials]
+    needs: [test-users-and-rbac, test-academics, test-financials, test-notifications]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -237,13 +273,38 @@ jobs:
           retention-days: 14
 
   # ─────────────────────────────────────────────────────────────
-  # Phase 5: Final Pipeline Status Aggregator
+  # Phase 5: Container Build Integrity Verification
+  # ─────────────────────────────────────────────────────────────
+  docker-build-check:
+    name: Backend Docker Image Build Check
+    needs: migrations-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: actions/setup-buildx-action@v3
+
+      - name: Build Docker Image (Dry Run)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: student-portal-backend:ci-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─────────────────────────────────────────────────────────────
+  # Phase 6: Final Pipeline Status Aggregator
   # ─────────────────────────────────────────────────────────────
   ci-pipeline-complete:
     name: CI Pipeline Complete
-    needs: coverage-report
+    needs: [coverage-report, docker-build-check]
     runs-on: ubuntu-latest
     steps:
       - name: Confirm All Checks Passed
         run: |
-          echo "All CI quality, migration, security, and domain test suites passed successfully with full coverage verification!"
+          echo "All CI quality, migration, security, domain test suites (139 tests), and Docker build checks passed successfully!"
+

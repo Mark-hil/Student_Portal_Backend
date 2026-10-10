@@ -1,6 +1,6 @@
 """API Views for Student Financials & Billing (Ghana Cedis GH₵)."""
 from decimal import Decimal
-from django.db.models import Sum, Q
+from django.db.models import Sum, Q, Count
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
@@ -217,21 +217,38 @@ class AdminFinancialsOverviewView(APIView):
 
     def get(self, request):
         statements = StudentAccountStatement.objects.all()
-        total_billed = statements.aggregate(total=Sum("total_billed"))["total"] or Decimal("0.00")
-        total_paid = statements.aggregate(total=Sum("total_paid"))["total"] or Decimal("0.00")
-        total_arrears = statements.aggregate(total=Sum("balance"))["total"] or Decimal("0.00")
+        totals = statements.aggregate(
+            total_billed=Sum("total_billed"),
+            total_paid=Sum("total_paid"),
+            total_arrears=Sum("balance"),
+        )
+        total_billed = totals["total_billed"] or Decimal("0.00")
+        total_paid = totals["total_paid"] or Decimal("0.00")
+        total_arrears = totals["total_arrears"] or Decimal("0.00")
 
-        # Breakdown by channel
-        momo_total = Payment.objects.filter(channel=Payment.Channel.MOMO, status=Payment.Status.COMPLETED).aggregate(t=Sum("amount"))["t"] or Decimal("0.00")
-        bank_total = Payment.objects.filter(channel__in=[Payment.Channel.BANK_API, Payment.Channel.BANK_MANUAL], status=Payment.Status.COMPLETED).aggregate(t=Sum("amount"))["t"] or Decimal("0.00")
+        # Breakdown by channel in one bulk query
+        channel_totals = (
+            Payment.objects.filter(status=Payment.Status.COMPLETED)
+            .values("channel")
+            .annotate(t=Sum("amount"))
+        )
+        channel_map = {row["channel"]: (row["t"] or Decimal("0.00")) for row in channel_totals}
+        momo_total = channel_map.get(Payment.Channel.MOMO, Decimal("0.00"))
+        bank_total = channel_map.get(Payment.Channel.BANK_API, Decimal("0.00")) + channel_map.get(
+            Payment.Channel.BANK_MANUAL, Decimal("0.00")
+        )
 
         recent_payments = Payment.objects.all().select_related("student", "statement")[:25]
         pending_slips = Payment.objects.filter(status=Payment.Status.PENDING_VERIFICATION).select_related("student", "statement")
         active_holds_count = FinancialHold.objects.filter(is_active=True).count()
 
-        BillingService.ensure_default_level_structures()
-        all_structures = SemesterFeeStructure.objects.filter(is_active=True).order_by("academic_level")
-        active_struct = all_structures.first() or BillingService.get_active_fee_structure()
+        # Only ensure fee structures if none exist to avoid 5-roundtrip penalty on every hit
+        all_structures = list(SemesterFeeStructure.objects.filter(is_active=True).order_by("academic_level"))
+        if not all_structures:
+            BillingService.ensure_default_level_structures()
+            all_structures = list(SemesterFeeStructure.objects.filter(is_active=True).order_by("academic_level"))
+
+        active_struct = all_structures[0] if all_structures else None
 
         # Calculate collection rate
         collection_rate = (
@@ -239,6 +256,23 @@ class AdminFinancialsOverviewView(APIView):
             if total_billed > 0
             else 0.0
         )
+
+        # Batch level statements aggregation into a single GROUP BY query
+        level_aggregates = statements.values("academic_level").annotate(
+            billed=Sum("total_billed"),
+            paid=Sum("total_paid"),
+            arrears=Sum("balance"),
+            cnt=Count("id"),
+        )
+        level_data_map = {row["academic_level"]: row for row in level_aggregates}
+
+        # Batch financial holds by academic level into one query
+        hold_counts = (
+            FinancialHold.objects.filter(is_active=True)
+            .values("student__profile__academic_level")
+            .annotate(cnt=Count("id"))
+        )
+        hold_map = {row["student__profile__academic_level"]: row["cnt"] for row in hold_counts}
 
         level_breakdown = []
         for level_code, level_label in [
@@ -248,16 +282,18 @@ class AdminFinancialsOverviewView(APIView):
             ("400", "Level 400 (Seniors)"),
             ("postgraduate", "Postgraduate"),
         ]:
-            lvl_stmts = statements.filter(academic_level=level_code)
-            lvl_billed = lvl_stmts.aggregate(t=Sum("total_billed"))["t"] or Decimal("0.00")
-            lvl_paid = lvl_stmts.aggregate(t=Sum("total_paid"))["t"] or Decimal("0.00")
-            lvl_arrears = lvl_stmts.aggregate(t=Sum("balance"))["t"] or Decimal("0.00")
-            lvl_holds = FinancialHold.objects.filter(student__profile__academic_level=level_code, is_active=True).count()
+            lvl_info = level_data_map.get(level_code, {})
+            lvl_billed = lvl_info.get("billed") or Decimal("0.00")
+            lvl_paid = lvl_info.get("paid") or Decimal("0.00")
+            lvl_arrears = lvl_info.get("arrears") or Decimal("0.00")
+            lvl_cnt = lvl_info.get("cnt") or 0
+            lvl_holds = hold_map.get(level_code, 0)
             lvl_rate = round((float(lvl_paid) / float(lvl_billed) * 100), 1) if lvl_billed > 0 else 0.0
+
             level_breakdown.append({
                 "level": level_code,
                 "title": level_label,
-                "student_count": lvl_stmts.count(),
+                "student_count": lvl_cnt,
                 "total_billed": lvl_billed,
                 "total_paid": lvl_paid,
                 "total_arrears": lvl_arrears,
@@ -276,7 +312,7 @@ class AdminFinancialsOverviewView(APIView):
                 "active_holds_count": active_holds_count,
                 "level_breakdown": level_breakdown,
             },
-            "active_fee_structure": SemesterFeeStructureSerializer(active_struct).data,
+            "active_fee_structure": SemesterFeeStructureSerializer(active_struct).data if active_struct else None,
             "fee_structures": SemesterFeeStructureSerializer(all_structures, many=True).data,
             "recent_payments": PaymentSerializer(recent_payments, many=True).data,
             "pending_bank_slips": PaymentSerializer(pending_slips, many=True).data,

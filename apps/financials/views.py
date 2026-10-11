@@ -71,6 +71,11 @@ class SubmitBankSlipView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         slip_image = request.FILES.get("slip_image")
+        if not slip_image:
+            return Response(
+                {"detail": "Official bank deposit slip photo or scan is required for audit verification."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             payment = BillingService.submit_manual_bank_slip(
@@ -104,6 +109,106 @@ class PaymentReceiptPDFView(APIView):
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
         response["Content-Disposition"] = f'inline; filename="{filename}"'
         return response
+
+
+class PaymentSlipImageView(APIView):
+    """
+    GET /api/v1/financials/payments/<id>/slip-image/
+    Masks the underlying Cloudinary/storage URL behind a clean university portal endpoint.
+    Verifies that the caller is the student owner or authorized staff/finance/admin.
+    """
+    permission_classes = []
+
+    def get(self, request, pk):
+        from rest_framework_simplejwt.authentication import JWTAuthentication
+        from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+        from django.core.files.storage import default_storage
+        from django.core.signing import TimestampSigner, BadSignature, SignatureExpired
+        import mimetypes
+        import requests
+
+        payment = get_object_or_404(Payment, pk=pk)
+
+        # 1. Check if accessed via valid cryptographically signed URL
+        sig = request.query_params.get("sig")
+        is_sig_valid = False
+        if sig:
+            try:
+                signer = TimestampSigner(salt="bank-slip-view")
+                signed_id = signer.unsign(sig, max_age=86400 * 7)  # 7-day valid signature
+                if str(signed_id) == str(payment.id):
+                    is_sig_valid = True
+            except (BadSignature, SignatureExpired, Exception):
+                is_sig_valid = False
+
+        # 2. Check if accessed via standard JWT auth (header or query token)
+        if not is_sig_valid:
+            user = request.user if (request.user and request.user.is_authenticated) else None
+            if not user:
+                token = request.query_params.get("token")
+                if token:
+                    try:
+                        jwt_auth = JWTAuthentication()
+                        validated_token = jwt_auth.get_validated_token(token)
+                        user = jwt_auth.get_user(validated_token)
+                    except (InvalidToken, TokenError, Exception):
+                        user = None
+
+            if not user:
+                return Response(
+                    {"detail": "Authentication credentials were not provided."},
+                    status=status.HTTP_401_UNAUTHORIZED
+                )
+
+            # Check permissions: owner or staff/admin/bursar/finance
+            is_owner = payment.student_id == user.id
+            is_staff_or_fin = (
+                user.is_staff
+                or getattr(user, "is_superuser", False)
+                or getattr(user, "role", "") in ("staff", "admin", "bursar", "finance", "super_admin")
+                or getattr(user, "user_type", "") in ("staff", "admin", "finance", "super_admin")
+            )
+            if not (is_owner or is_staff_or_fin):
+                return Response(
+                    {"detail": "Permission denied to view this deposit slip."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+        if not payment.slip_image:
+            return Response(
+                {"detail": "No deposit slip image attached to this payment record."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        try:
+            # If the file exists locally on disk (dev or fallback)
+            if default_storage.exists(payment.slip_image.name):
+                file_obj = default_storage.open(payment.slip_image.name, "rb")
+                content_type, _ = mimetypes.guess_type(payment.slip_image.name)
+                response = HttpResponse(file_obj.read(), content_type=content_type or "image/jpeg")
+                response["Content-Disposition"] = f'inline; filename="deposit_slip_{payment.reference_number}.jpg"'
+                response["Cache-Control"] = "private, max-age=3600"
+                return response
+
+            # Stream from storage URL (Cloudinary)
+            media_url = payment.slip_image.url
+            upstream_res = requests.get(media_url, timeout=10)
+            if upstream_res.status_code == 200:
+                content_type = upstream_res.headers.get("content-type", "image/jpeg")
+                response = HttpResponse(upstream_res.content, content_type=content_type)
+                response["Content-Disposition"] = f'inline; filename="deposit_slip_{payment.reference_number}.jpg"'
+                response["Cache-Control"] = "private, max-age=3600"
+                return response
+            else:
+                return Response(
+                    {"detail": f"Failed to retrieve deposit slip from storage (HTTP {upstream_res.status_code})."},
+                    status=status.HTTP_502_BAD_GATEWAY
+                )
+        except Exception as err:
+            return Response(
+                {"detail": f"Error retrieving deposit slip image: {str(err)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class IsBankWebhookAuthorizedOrStaff(permissions.BasePermission):
@@ -325,8 +430,16 @@ class AdminVerifySlipView(APIView):
 
     def post(self, request, pk):
         payment = get_object_or_404(Payment, pk=pk)
-        approve = request.data.get("approve", True)
-        payment = BillingService.verify_manual_bank_slip(payment, verified_by=request.user, approve=approve)
+        approve_val = request.data.get("approve", True)
+        if isinstance(approve_val, str):
+            approve = approve_val.strip().lower() in ("true", "1", "yes")
+        else:
+            approve = bool(approve_val)
+
+        reason = request.data.get("notes") or request.data.get("reason", "")
+        payment = BillingService.verify_manual_bank_slip(
+            payment, verified_by=request.user, approve=approve, notes=reason
+        )
 
         action_word = "approved and credited" if approve else "rejected"
         return Response({

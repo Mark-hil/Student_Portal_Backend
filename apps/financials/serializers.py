@@ -11,6 +11,7 @@ class PaymentSerializer(serializers.ModelSerializer):
     student_name = serializers.SerializerMethodField()
     student_email = serializers.ReadOnlyField(source="student.email")
     student_index = serializers.SerializerMethodField()
+    slip_image = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
@@ -39,6 +40,14 @@ class PaymentSerializer(serializers.ModelSerializer):
 
     def get_student_index(self, obj):
         return getattr(obj.student, "student_id", None) or f"UG-{str(obj.student.id)[:8].upper()}"
+
+    def get_slip_image(self, obj):
+        if not obj.slip_image:
+            return None
+        from django.core.signing import TimestampSigner
+        signer = TimestampSigner(salt="bank-slip-view")
+        sig = signer.sign(str(obj.id))
+        return f"/api/v1/financials/payments/{obj.id}/slip-image/?sig={sig}"
 
 
 class StudentAccountStatementSerializer(serializers.ModelSerializer):
@@ -123,6 +132,22 @@ class ManualBankSlipRequestSerializer(serializers.Serializer):
     bank_name = serializers.CharField(max_length=60)
     slip_ref = serializers.CharField(max_length=100)
     notes = serializers.CharField(max_length=255, required=False, allow_blank=True)
+
+    def to_internal_value(self, data):
+        data_copy = data.copy() if hasattr(data, "copy") else dict(data)
+        if "teller_slip_reference" in data_copy and "slip_ref" not in data_copy:
+            data_copy["slip_ref"] = data_copy["teller_slip_reference"]
+        return super().to_internal_value(data_copy)
+
+    def validate_slip_ref(self, value):
+        clean_ref = value.strip()
+        existing = Payment.objects.filter(reference_number__iexact=clean_ref).exclude(status=Payment.Status.FAILED).first()
+        if existing:
+            status_desc = "already verified & credited" if existing.status == Payment.Status.COMPLETED else "currently pending verification"
+            raise serializers.ValidationError(
+                f"Deposit slip with reference '{clean_ref}' is {status_desc}. Duplicate submissions are not permitted."
+            )
+        return clean_ref
 
 
 class BankNotificationRequestSerializer(serializers.Serializer):

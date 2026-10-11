@@ -312,3 +312,83 @@ class TestFinancialsAPI:
         client.force_authenticate(user=admin_user)
         res_admin = client.get("/api/v1/financials/admin/overview/")
         assert res_admin.status_code == 200
+
+    def test_manual_bank_slip_mandatory_image(self, student_user, fee_structure):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        client = APIClient()
+        client.force_authenticate(user=student_user)
+
+        # 1. Submission without slip image should fail (400)
+        payload = {
+            "amount": "1000.00",
+            "bank_name": "GCB Bank",
+            "slip_ref": "GCB-MAN-101",
+        }
+        res_no_img = client.post("/api/v1/financials/pay/bank-slip/", payload)
+        assert res_no_img.status_code == 400
+        assert "Official bank deposit slip photo or scan is required" in res_no_img.data["detail"]
+
+        # 2. Submission with valid slip image should succeed (201)
+        valid_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+        fake_file = SimpleUploadedFile("slip.png", valid_png, content_type="image/png")
+        payload["slip_image"] = fake_file
+        res_ok = client.post("/api/v1/financials/pay/bank-slip/", payload, format="multipart")
+        assert res_ok.status_code == 201, f"res_ok failed with {res_ok.data}"
+        assert res_ok.data["payment"]["status"] == "pending_verification"
+
+    def test_manual_bank_slip_duplicate_reference(self, student_user, fee_structure):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        client = APIClient()
+        client.force_authenticate(user=student_user)
+
+        valid_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+        fake_file = SimpleUploadedFile("slip1.png", valid_png, content_type="image/png")
+        payload = {
+            "amount": "1000.00",
+            "bank_name": "GCB Bank",
+            "slip_ref": "DUP-REF-999",
+            "slip_image": fake_file,
+        }
+        res1 = client.post("/api/v1/financials/pay/bank-slip/", payload, format="multipart")
+        assert res1.status_code == 201
+
+        # Second attempt with same reference should be rejected
+        fake_file2 = SimpleUploadedFile("slip2.png", valid_png, content_type="image/png")
+        payload2 = {
+            "amount": "1000.00",
+            "bank_name": "GCB Bank",
+            "slip_ref": "DUP-REF-999",
+            "slip_image": fake_file2,
+        }
+        res2 = client.post("/api/v1/financials/pay/bank-slip/", payload2, format="multipart")
+        assert res2.status_code == 400
+        assert "Duplicate submissions are not permitted" in str(res2.data)
+
+    def test_manual_bank_slip_rejection_with_reason(self, student_user, admin_user, fee_structure):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        client = APIClient()
+        client.force_authenticate(user=student_user)
+
+        valid_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+        fake_file = SimpleUploadedFile("slip.png", valid_png, content_type="image/png")
+        res_slip = client.post(
+            "/api/v1/financials/pay/bank-slip/",
+            {"amount": "2000.00", "bank_name": "Ecobank", "slip_ref": "ECO-REJ-001", "slip_image": fake_file},
+            format="multipart",
+        )
+        assert res_slip.status_code == 201
+        payment_id = res_slip.data["payment"]["id"]
+
+        # Admin rejects with custom reason
+        client.force_authenticate(user=admin_user)
+        rej_res = client.post(
+            f"/api/v1/financials/admin/verify-slip/{payment_id}/",
+            {"approve": False, "notes": "Reference not found on official bank statement"},
+        )
+        assert rej_res.status_code == 200
+        payment = Payment.objects.get(pk=payment_id)
+        assert payment.status == Payment.Status.FAILED
+        assert payment.notes == "Declined: Reference not found on official bank statement"
+        # Balance should still not be deducted
+        statement = payment.statement
+        assert statement.balance == Decimal("4600.00")

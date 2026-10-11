@@ -366,21 +366,24 @@ class BillingService:
         return payment
 
     @classmethod
-    def verify_manual_bank_slip(cls, payment: Payment, verified_by, approve: bool = True) -> Payment:
+    def verify_manual_bank_slip(cls, payment: Payment, verified_by, approve: bool = True, notes: str = "") -> Payment:
         """Bursar verifies or rejects a manual bank deposit slip."""
         with transaction.atomic():
             if approve:
                 payment.status = Payment.Status.COMPLETED
                 payment.verified_by = verified_by
                 payment.verified_at = timezone.now()
-                payment.save(update_fields=["status", "verified_by", "verified_at"])
+                if notes:
+                    payment.notes = notes
+                payment.save(update_fields=["status", "verified_by", "verified_at", "notes"])
                 payment.statement.recalculate()
                 cls.sync_financial_hold(payment.student, payment.statement)
             else:
                 payment.status = Payment.Status.FAILED
                 payment.verified_by = verified_by
                 payment.verified_at = timezone.now()
-                payment.save(update_fields=["status", "verified_by", "verified_at"])
+                payment.notes = f"Declined: {notes}" if notes else "Declined by Accounts Office"
+                payment.save(update_fields=["status", "verified_by", "verified_at", "notes"])
 
         return payment
 

@@ -5,6 +5,7 @@ from .views import (
     MoMoPaymentView,
     SubmitBankSlipView,
     PaymentReceiptPDFView,
+    PaymentSlipImageView,
     BankStudentLookupView,
     BankPaymentNotificationView,
     AdminFinancialsOverviewView,
@@ -23,6 +24,7 @@ urlpatterns = [
     path("pay/momo/", MoMoPaymentView.as_view(), name="pay_momo"),
     path("pay/bank-slip/", SubmitBankSlipView.as_view(), name="submit_bank_slip"),
     path("payments/<int:pk>/receipt/", PaymentReceiptPDFView.as_view(), name="payment_receipt_pdf"),
+    path("payments/<int:pk>/slip-image/", PaymentSlipImageView.as_view(), name="payment_slip_image"),
 
     # Bank Collect Integration & Webhooks
     path("bank/lookup/", BankStudentLookupView.as_view(), name="bank_lookup"),

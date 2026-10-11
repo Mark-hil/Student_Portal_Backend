@@ -15,6 +15,11 @@ from .views import (
     AdminExportStatementsView,
     AdminExportPaymentsView,
     StudentExportStatementView,
+    StudentRequestRefundView,
+    StudentRefundHistoryView,
+    AdminRefundListView,
+    AdminProcessRefundView,
+    AdminBulkBillStudentsView,
 )
 
 urlpatterns = [
@@ -25,6 +30,8 @@ urlpatterns = [
     path("pay/bank-slip/", SubmitBankSlipView.as_view(), name="submit_bank_slip"),
     path("payments/<int:pk>/receipt/", PaymentReceiptPDFView.as_view(), name="payment_receipt_pdf"),
     path("payments/<int:pk>/slip-image/", PaymentSlipImageView.as_view(), name="payment_slip_image"),
+    path("refund/request/", StudentRequestRefundView.as_view(), name="student_refund_request"),
+    path("refund/my-requests/", StudentRefundHistoryView.as_view(), name="student_refund_history"),
 
     # Bank Collect Integration & Webhooks
     path("bank/lookup/", BankStudentLookupView.as_view(), name="bank_lookup"),
@@ -37,4 +44,8 @@ urlpatterns = [
     path("admin/verify-slip/<int:pk>/", AdminVerifySlipView.as_view(), name="admin_verify_slip"),
     path("admin/adjust/", AdminAdjustStatementView.as_view(), name="admin_adjust"),
     path("admin/fee-structure/", AdminFeeStructureView.as_view(), name="admin_fee_structure"),
+    path("admin/refunds/", AdminRefundListView.as_view(), name="admin_refunds_list"),
+    path("admin/refunds/<int:pk>/action/", AdminProcessRefundView.as_view(), name="admin_process_refund"),
+    path("admin/bill-students/", AdminBulkBillStudentsView.as_view(), name="admin_bill_students"),
 ]
+

@@ -13,12 +13,16 @@ for default_host in ("localhost", "127.0.0.1", "0.0.0.0", "api", "nginx", "tests
 # ── Neon / PostgreSQL Database ────────────────────────────────────────────────
 # Supports direct Neon connection string via DATABASE_URL or individual DB_* variables.
 DATABASE_URL = os.environ.get("DATABASE_URL")
+# For pooled endpoints (e.g. Neon PgBouncer), disable per-request health check queries to save roundtrips
+is_pooled = bool(DATABASE_URL and "-pooler" in DATABASE_URL)
+conn_health = os.environ.get("DB_CONN_HEALTH_CHECKS", "false" if is_pooled else "true").lower() in ("true", "1", "yes")
+
 if DATABASE_URL:
     DATABASES = {
         "default": dj_database_url.parse(
             DATABASE_URL,
             conn_max_age=int(os.environ.get("DB_CONN_MAX_AGE", 600)),
-            conn_health_checks=True,
+            conn_health_checks=conn_health,
             ssl_require=True,
         )
     }
@@ -36,7 +40,7 @@ else:
         }
     }
 
-# Read Replica Configuration (optional for Neon; mirrors default if no distinct replica is set)
+# Read Replica Configuration (only configured if a distinct replica host/URL is explicitly provided)
 DATABASE_REPLICA_URL = os.environ.get("DATABASE_REPLICA_URL")
 DB_REPLICA_HOST = os.environ.get("DB_REPLICA_HOST")
 
@@ -44,7 +48,7 @@ if DATABASE_REPLICA_URL:
     DATABASES["replica"] = dj_database_url.parse(
         DATABASE_REPLICA_URL,
         conn_max_age=int(os.environ.get("DB_CONN_MAX_AGE", 600)),
-        conn_health_checks=True,
+        conn_health_checks=conn_health,
         ssl_require=True,
     )
     DATABASES["replica"]["TEST"] = {"MIRROR": "default"}
@@ -52,12 +56,11 @@ elif not DATABASE_URL and DB_REPLICA_HOST:
     DATABASES["replica"] = DATABASES["default"].copy()
     DATABASES["replica"]["HOST"] = DB_REPLICA_HOST
     DATABASES["replica"]["TEST"] = {"MIRROR": "default"}
-else:
-    # Default: mirror default Neon database for replica reads
-    DATABASES["replica"] = DATABASES["default"].copy()
-    DATABASES["replica"]["TEST"] = {"MIRROR": "default"}
 
-DATABASE_ROUTERS = ["core.db_router.PrimaryReplicaRouter"]
+if "replica" in DATABASES:
+    DATABASE_ROUTERS = ["core.db_router.PrimaryReplicaRouter"]
+else:
+    DATABASE_ROUTERS = []
 
 # ── Security ──────────────────────────────────────────────────────────────────
 SECURE_SSL_REDIRECT             = os.environ.get("SECURE_SSL_REDIRECT", "False").lower() in ("true", "1", "yes")

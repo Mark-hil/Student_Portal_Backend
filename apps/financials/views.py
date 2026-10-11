@@ -8,7 +8,7 @@ from rest_framework import status, permissions
 from rest_framework.views import APIView
 from rest_framework.response import Response
 
-from .models import SemesterFeeStructure, StudentAccountStatement, Payment, FinancialHold
+from .models import SemesterFeeStructure, StudentAccountStatement, Payment, FinancialHold, RefundRequest
 from .services import BillingService
 from .receipt import PaymentReceiptGenerator
 from .serializers import (
@@ -19,6 +19,10 @@ from .serializers import (
     ManualBankSlipRequestSerializer,
     BankNotificationRequestSerializer,
     BankStudentLookupSerializer,
+    RefundRequestSerializer,
+    SubmitRefundRequestSerializer,
+    ProcessRefundActionSerializer,
+    BulkBillStudentsSerializer,
 )
 from core.permissions import IsStudentRegistered
 
@@ -86,6 +90,7 @@ class SubmitBankSlipView(APIView):
                 slip_image=slip_image,
                 notes=data.get("notes", ""),
             )
+            invalidate_bursar_overview_cache()
             return Response({
                 "message": "Bank deposit slip submitted successfully. It will be credited once verified by the Accounts Office.",
                 "payment": PaymentSerializer(payment).data,
@@ -295,6 +300,7 @@ class BankPaymentNotificationView(APIView):
                 branch=data.get("branch", ""),
                 depositor_name=data.get("depositor_name", ""),
             )
+            invalidate_bursar_overview_cache()
             return Response({
                 "status": "SUCCESS",
                 "message": f"Payment of GH₵ {payment.amount:,.2f} recorded and credited successfully.",
@@ -316,20 +322,39 @@ class IsFinanceOrAdmin(permissions.BasePermission):
         )
 
 
+def invalidate_bursar_overview_cache():
+    try:
+        from django.core.cache import cache
+        cache.delete("admin_financials_overview_v1")
+    except Exception:
+        pass
+
+
 class AdminFinancialsOverviewView(APIView):
     """GET /api/v1/financials/admin/overview/"""
     permission_classes = [IsFinanceOrAdmin]
 
     def get(self, request):
+        cache_key = "admin_financials_overview_v1"
+        try:
+            from django.core.cache import cache
+            cached_data = cache.get(cache_key)
+            if cached_data is not None:
+                return Response(cached_data)
+        except Exception:
+            cached_data = None
+
         statements = StudentAccountStatement.objects.all()
         totals = statements.aggregate(
             total_billed=Sum("total_billed"),
             total_paid=Sum("total_paid"),
             total_arrears=Sum("balance"),
+            total_credits=Sum("credit_balance"),
         )
         total_billed = totals["total_billed"] or Decimal("0.00")
         total_paid = totals["total_paid"] or Decimal("0.00")
         total_arrears = totals["total_arrears"] or Decimal("0.00")
+        total_credits = totals["total_credits"] or Decimal("0.00")
 
         # Breakdown by channel in one bulk query
         channel_totals = (
@@ -346,6 +371,18 @@ class AdminFinancialsOverviewView(APIView):
         recent_payments = Payment.objects.all().select_related("student", "statement")[:25]
         pending_slips = Payment.objects.filter(status=Payment.Status.PENDING_VERIFICATION).select_related("student", "statement")
         active_holds_count = FinancialHold.objects.filter(is_active=True).count()
+
+        # Refunds metrics
+        pending_refunds_count = RefundRequest.objects.filter(status=RefundRequest.Status.PENDING).count()
+        recent_refunds = RefundRequest.objects.all().select_related("student", "statement")[:25]
+        pending_refunds = RefundRequest.objects.filter(status=RefundRequest.Status.PENDING).select_related("student", "statement")
+
+        # Students with credit surplus (school owes student)
+        credit_students = (
+            StudentAccountStatement.objects.filter(credit_balance__gt=Decimal("0.00"))
+            .select_related("student")
+            .order_by("-credit_balance")[:25]
+        )
 
         # Only ensure fee structures if none exist to avoid 5-roundtrip penalty on every hit
         all_structures = list(SemesterFeeStructure.objects.filter(is_active=True).order_by("academic_level"))
@@ -367,6 +404,7 @@ class AdminFinancialsOverviewView(APIView):
             billed=Sum("total_billed"),
             paid=Sum("total_paid"),
             arrears=Sum("balance"),
+            credits=Sum("credit_balance"),
             cnt=Count("id"),
         )
         level_data_map = {row["academic_level"]: row for row in level_aggregates}
@@ -391,6 +429,7 @@ class AdminFinancialsOverviewView(APIView):
             lvl_billed = lvl_info.get("billed") or Decimal("0.00")
             lvl_paid = lvl_info.get("paid") or Decimal("0.00")
             lvl_arrears = lvl_info.get("arrears") or Decimal("0.00")
+            lvl_credits = lvl_info.get("credits") or Decimal("0.00")
             lvl_cnt = lvl_info.get("cnt") or 0
             lvl_holds = hold_map.get(level_code, 0)
             lvl_rate = round((float(lvl_paid) / float(lvl_billed) * 100), 1) if lvl_billed > 0 else 0.0
@@ -402,26 +441,40 @@ class AdminFinancialsOverviewView(APIView):
                 "total_billed": lvl_billed,
                 "total_paid": lvl_paid,
                 "total_arrears": lvl_arrears,
+                "total_credits": lvl_credits,
                 "active_holds": lvl_holds,
                 "collection_rate": lvl_rate,
             })
 
-        return Response({
+        response_data = {
             "metrics": {
                 "total_billed": total_billed,
                 "total_paid": total_paid,
                 "total_arrears": total_arrears,
+                "total_credits": total_credits,
                 "collection_rate": collection_rate,
                 "momo_total": momo_total,
                 "bank_total": bank_total,
                 "active_holds_count": active_holds_count,
+                "pending_refunds_count": pending_refunds_count,
                 "level_breakdown": level_breakdown,
             },
             "active_fee_structure": SemesterFeeStructureSerializer(active_struct).data if active_struct else None,
             "fee_structures": SemesterFeeStructureSerializer(all_structures, many=True).data,
             "recent_payments": PaymentSerializer(recent_payments, many=True).data,
             "pending_bank_slips": PaymentSerializer(pending_slips, many=True).data,
-        })
+            "pending_refunds": RefundRequestSerializer(pending_refunds, many=True).data,
+            "recent_refunds": RefundRequestSerializer(recent_refunds, many=True).data,
+            "credit_students": StudentAccountStatementSerializer(credit_students, many=True).data,
+        }
+
+        try:
+            from django.core.cache import cache
+            cache.set(cache_key, response_data, timeout=60)
+        except Exception:
+            pass
+
+        return Response(response_data)
 
 
 class AdminVerifySlipView(APIView):
@@ -441,6 +494,7 @@ class AdminVerifySlipView(APIView):
             payment, verified_by=request.user, approve=approve, notes=reason
         )
 
+        invalidate_bursar_overview_cache()
         action_word = "approved and credited" if approve else "rejected"
         return Response({
             "message": f"Bank deposit slip {payment.reference_number} has been {action_word}.",
@@ -461,6 +515,7 @@ class AdminAdjustStatementView(APIView):
         statement = BillingService.get_or_create_statement(student)
         BillingService.apply_bursary_award(statement, bursary_amount, note)
 
+        invalidate_bursar_overview_cache()
         return Response({
             "message": f"Applied GH₵ {bursary_amount:,.2f} bursary to {student.email}.",
             "statement": StudentAccountStatementSerializer(statement).data,
@@ -509,6 +564,7 @@ class AdminFeeStructureView(APIView):
 
         all_structures = SemesterFeeStructure.objects.filter(semester=semester, is_active=True).order_by("academic_level")
 
+        invalidate_bursar_overview_cache()
         return Response({
             "message": f"Fee structure for {struct.get_academic_level_display()} updated successfully in Ghana Cedis (GH₵).",
             "fee_structure": SemesterFeeStructureSerializer(struct).data,
@@ -546,3 +602,109 @@ class StudentExportStatementView(APIView):
     def get(self, request):
         from .exports import export_student_personal_statement_csv
         return export_student_personal_statement_csv(request.user)
+
+
+class StudentRequestRefundView(APIView):
+    """POST /api/v1/financials/refund/request/ — student requests refund of fee overpayment."""
+    permission_classes = [permissions.IsAuthenticated, IsStudentRegistered]
+
+    def post(self, request):
+        serializer = SubmitRefundRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            refund_req = BillingService.request_refund(
+                student=request.user,
+                amount=data["amount"],
+                channel=data["channel"],
+                account_details=data["account_details"],
+                reason=data.get("reason", ""),
+            )
+            invalidate_bursar_overview_cache()
+            return Response({
+                "message": (
+                    f"Refund request of GH₵ {refund_req.amount:,.2f} submitted successfully. "
+                    "The Accounts Office will review and disburse your payment."
+                ),
+                "refund": RefundRequestSerializer(refund_req).data,
+            }, status=status.HTTP_201_CREATED)
+        except ValueError as ve:
+            return Response({"detail": str(ve)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({"detail": f"Failed to submit refund request: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class StudentRefundHistoryView(APIView):
+    """GET /api/v1/financials/refund/my-requests/ — student lists their refund requests."""
+    permission_classes = [permissions.IsAuthenticated, IsStudentRegistered]
+
+    def get(self, request):
+        refunds = RefundRequest.objects.filter(student=request.user).order_by("-created_at")
+        return Response(RefundRequestSerializer(refunds, many=True).data)
+
+
+class AdminRefundListView(APIView):
+    """GET /api/v1/financials/admin/refunds/ — Bursar / Finance lists all student refund requests."""
+    permission_classes = [IsFinanceOrAdmin]
+
+    def get(self, request):
+        status_filter = request.query_params.get("status")
+        refunds = RefundRequest.objects.all().select_related("student", "statement")
+        if status_filter:
+            refunds = refunds.filter(status=status_filter)
+        return Response(RefundRequestSerializer(refunds, many=True).data)
+
+
+class AdminProcessRefundView(APIView):
+    """POST /api/v1/financials/admin/refunds/<id>/action/ — Bursar approves/disburses or rejects refund."""
+    permission_classes = [IsFinanceOrAdmin]
+
+    def post(self, request, pk):
+        refund_req = get_object_or_404(RefundRequest, pk=pk)
+        serializer = ProcessRefundActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            processed = BillingService.process_refund(
+                refund_req=refund_req,
+                reviewed_by=request.user,
+                approve=data.get("approve", True),
+                disbursement_ref=data.get("disbursement_ref", ""),
+                admin_notes=data.get("notes", ""),
+            )
+            invalidate_bursar_overview_cache()
+            action_desc = "disbursed" if processed.status == RefundRequest.Status.DISBURSED else "rejected"
+            return Response({
+                "message": f"Refund #{processed.id} has been {action_desc} successfully.",
+                "refund": RefundRequestSerializer(processed).data,
+            })
+        except Exception as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminBulkBillStudentsView(APIView):
+    """POST /api/v1/financials/admin/bill-students/ — bulk generate/apply semester bills to students."""
+    permission_classes = [IsFinanceOrAdmin]
+
+    def post(self, request):
+        serializer = BulkBillStudentsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        semester = data["semester"]
+        academic_level = data.get("academic_level", "all")
+
+        try:
+            stats = BillingService.bill_students_for_semester(semester=semester, academic_level=academic_level)
+            invalidate_bursar_overview_cache()
+            return Response({
+                "message": (
+                    f"Successfully billed {stats['billed_count']} students for {semester}. "
+                    f"Total Billed: GH₵ {stats['total_billed']:,.2f}, Rollover Credits Applied: GH₵ {stats['total_credits_applied']:,.2f}."
+                ),
+                "stats": stats,
+            })
+        except Exception as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)

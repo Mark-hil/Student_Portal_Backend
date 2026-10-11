@@ -2,11 +2,11 @@
 from decimal import Decimal
 import logging
 import uuid
-from django.db import transaction
-from django.db.models import Q
+from django.db import transaction, models
+from django.db.models import Q, Sum
 from django.utils import timezone
 from django.contrib.auth import get_user_model
-from .models import SemesterFeeStructure, StudentAccountStatement, Payment, FinancialHold
+from .models import SemesterFeeStructure, StudentAccountStatement, Payment, FinancialHold, RefundRequest
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -108,7 +108,8 @@ class BillingService:
 
     @classmethod
     def get_or_create_statement(cls, student, semester: str = None) -> StudentAccountStatement:
-        """Get or initialize the semester statement for a student based on their dynamic academic level."""
+        """Get or initialize the semester statement for a student based on their dynamic academic level,
+        automatically carrying forward any credit overpayments or unpaid arrears from previous semesters."""
         student_level = getattr(student, "academic_level", "100") or "100"
         fee_struct = cls.get_fee_structure_for_level(academic_level=student_level, semester=semester)
         target_semester = semester or fee_struct.semester
@@ -125,10 +126,38 @@ class BillingService:
                 "total_billed": fee_struct.total_semester_fee,
                 "total_paid": Decimal("0.00"),
                 "balance": fee_struct.total_semester_fee,
+                "credit_balance": Decimal("0.00"),
+                "previous_credit_applied": Decimal("0.00"),
+                "previous_arrears_applied": Decimal("0.00"),
                 "due_date": fee_struct.due_date,
                 "status": StudentAccountStatement.Status.UNPAID,
             }
         )
+
+        if created:
+            # Check for previous semester statement to roll over credit surplus or unpaid arrears
+            prev_statement = (
+                StudentAccountStatement.objects.filter(student=student)
+                .exclude(id=statement.id)
+                .order_by("-created_at")
+                .first()
+            )
+            if prev_statement:
+                # 1. If previous semester had a credit surplus (student overpaid):
+                if prev_statement.credit_balance > Decimal("0.00"):
+                    statement.previous_credit_applied = prev_statement.credit_balance
+                    logger.info(
+                        "Carried forward credit overpayment of GH₵ %s from %s for %s",
+                        prev_statement.credit_balance, prev_statement.semester, student.email
+                    )
+                # 2. If previous semester had unpaid debt (arrears):
+                elif prev_statement.balance > Decimal("0.00"):
+                    statement.previous_arrears_applied = prev_statement.balance
+                    logger.info(
+                        "Carried forward unpaid arrears of GH₵ %s from %s for %s",
+                        prev_statement.balance, prev_statement.semester, student.email
+                    )
+                statement.save(update_fields=["previous_credit_applied", "previous_arrears_applied"])
 
         statement.recalculate()
         cls.sync_financial_hold(student, statement)
@@ -394,3 +423,115 @@ class BillingService:
         statement.recalculate()
         cls.sync_financial_hold(statement.student, statement)
         return statement
+
+    @classmethod
+    def bill_students_for_semester(cls, semester: str, academic_level: str = None) -> dict:
+        """Bulk bill enrolled students for a semester based on the configured fee schedules."""
+        students_query = User.objects.filter(role="student", is_active=True, is_deleted=False)
+        if academic_level and academic_level != "all":
+            students_query = students_query.filter(academic_level=str(academic_level))
+
+        students = list(students_query)
+        billed_count = 0
+        total_billed_amount = Decimal("0.00")
+        total_credits_applied = Decimal("0.00")
+
+        with transaction.atomic():
+            for student in students:
+                stmt = cls.get_or_create_statement(student, semester=semester)
+                billed_count += 1
+                total_billed_amount += stmt.total_billed
+                total_credits_applied += stmt.previous_credit_applied
+
+        logger.info(
+            "Bulk billed %d students for %s. Total billed: GH₵ %s, Rollover credits applied: GH₵ %s",
+            billed_count, semester, total_billed_amount, total_credits_applied
+        )
+        return {
+            "semester": semester,
+            "academic_level": academic_level or "all",
+            "billed_count": billed_count,
+            "total_billed": total_billed_amount,
+            "total_credits_applied": total_credits_applied,
+        }
+
+    @classmethod
+    def request_refund(
+        cls,
+        student,
+        amount: Decimal,
+        channel: str,
+        account_details: str,
+        reason: str = "",
+        statement: StudentAccountStatement = None
+    ) -> RefundRequest:
+        """Submit a student refund request against an existing credit surplus (overpayment)."""
+        if amount <= Decimal("0.00"):
+            raise ValueError("Refund amount must be greater than zero.")
+
+        target_stmt = statement or cls.get_or_create_statement(student)
+        target_stmt.recalculate()
+
+        if target_stmt.credit_balance < amount:
+            raise ValueError(
+                f"Requested refund (GH₵ {amount:,.2f}) exceeds available credit balance "
+                f"(GH₵ {target_stmt.credit_balance:,.2f})."
+            )
+
+        # Ensure no pending request exceeds available balance
+        pending_total = RefundRequest.objects.filter(
+            statement=target_stmt,
+            status=RefundRequest.Status.PENDING
+        ).aggregate(total=models.Sum("amount"))["total"] or Decimal("0.00")
+
+        if (pending_total + amount) > target_stmt.credit_balance:
+            raise ValueError(
+                f"You already have GH₵ {pending_total:,.2f} in pending refund requests. "
+                f"Total requested would exceed your credit balance of GH₵ {target_stmt.credit_balance:,.2f}."
+            )
+
+        refund_req = RefundRequest.objects.create(
+            student=student,
+            statement=target_stmt,
+            amount=amount,
+            channel=channel,
+            account_details=account_details,
+            reason=reason or "Fee overpayment refund request",
+            status=RefundRequest.Status.PENDING,
+        )
+        return refund_req
+
+    @classmethod
+    def process_refund(
+        cls,
+        refund_req: RefundRequest,
+        reviewed_by,
+        approve: bool = True,
+        disbursement_ref: str = "",
+        admin_notes: str = ""
+    ) -> RefundRequest:
+        """Bursar / Accounts Office approves and disburses or rejects a student refund request."""
+        with transaction.atomic():
+            refund_req.reviewed_by = reviewed_by
+            refund_req.reviewed_at = timezone.now()
+            refund_req.admin_notes = admin_notes
+
+            if approve:
+                refund_req.status = RefundRequest.Status.DISBURSED
+                refund_req.disbursement_reference = disbursement_ref or f"RFND-{uuid.uuid4().hex[:8].upper()}"
+                refund_req.save()
+
+                # Update statement refunded amount and recalculate
+                statement = refund_req.statement
+                statement.refunded_amount += refund_req.amount
+                statement.recalculate()
+                cls.sync_financial_hold(statement.student, statement)
+                logger.info(
+                    "Disbursed refund of GH₵ %s for %s. Ref: %s",
+                    refund_req.amount, refund_req.student.email, refund_req.disbursement_reference
+                )
+            else:
+                refund_req.status = RefundRequest.Status.REJECTED
+                refund_req.save()
+
+        return refund_req

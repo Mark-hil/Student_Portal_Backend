@@ -2,7 +2,7 @@
 from decimal import Decimal
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import SemesterFeeStructure, StudentAccountStatement, Payment, FinancialHold
+from .models import SemesterFeeStructure, StudentAccountStatement, Payment, FinancialHold, RefundRequest
 
 User = get_user_model()
 
@@ -67,10 +67,14 @@ class StudentAccountStatementSerializer(serializers.ModelSerializer):
             "src_dues",
             "examination_fee",
             "bursary_aid",
+            "previous_credit_applied",
+            "previous_arrears_applied",
             "academic_level",
             "total_billed",
             "total_paid",
+            "refunded_amount",
             "balance",
+            "credit_balance",
             "currency",
             "status",
             "due_date",
@@ -176,5 +180,57 @@ class BankStudentLookupSerializer(serializers.Serializer):
     semester = serializers.CharField()
     total_billed = serializers.DecimalField(max_digits=10, decimal_places=2)
     total_paid = serializers.DecimalField(max_digits=10, decimal_places=2)
-    balance_due = serializers.DecimalField(max_digits=10, decimal_places=2)
     status = serializers.CharField()
+
+
+class RefundRequestSerializer(serializers.ModelSerializer):
+    student_name = serializers.SerializerMethodField()
+    student_email = serializers.ReadOnlyField(source="student.email")
+    student_index = serializers.SerializerMethodField()
+    semester = serializers.ReadOnlyField(source="statement.semester")
+
+    class Meta:
+        model = RefundRequest
+        fields = [
+            "id",
+            "student_id",
+            "student_name",
+            "student_email",
+            "student_index",
+            "semester",
+            "amount",
+            "currency",
+            "channel",
+            "account_details",
+            "reason",
+            "status",
+            "disbursement_reference",
+            "admin_notes",
+            "created_at",
+            "reviewed_at",
+        ]
+
+    def get_student_name(self, obj):
+        name = f"{obj.student.first_name} {obj.student.last_name}".strip()
+        return name or obj.student.email
+
+    def get_student_index(self, obj):
+        return getattr(obj.student, "student_id", None) or f"UG-{str(obj.student.id)[:8].upper()}"
+
+
+class SubmitRefundRequestSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("1.00"))
+    channel = serializers.ChoiceField(choices=RefundRequest.Channel.choices, default=RefundRequest.Channel.MOMO)
+    account_details = serializers.CharField(max_length=150)
+    reason = serializers.CharField(max_length=500, required=False, allow_blank=True)
+
+
+class ProcessRefundActionSerializer(serializers.Serializer):
+    approve = serializers.BooleanField(default=True)
+    disbursement_ref = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    notes = serializers.CharField(max_length=500, required=False, allow_blank=True)
+
+
+class BulkBillStudentsSerializer(serializers.Serializer):
+    semester = serializers.CharField(max_length=60)
+    academic_level = serializers.CharField(max_length=20, required=False, default="all")

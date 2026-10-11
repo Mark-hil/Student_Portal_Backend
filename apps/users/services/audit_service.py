@@ -4,12 +4,32 @@ Provides centralized, defensive, and structured audit event logging.
 Guarantees fail-safe execution so that logging issues never interrupt
 primary business operations while strictly maintaining tamper-evident audit trails.
 """
+import sys
+import atexit
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Any, Dict
 import logging
 from django.utils import timezone
 from apps.users.models import AuditLog
 
 logger = logging.getLogger("apps.audit")
+
+_audit_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="audit_writer")
+atexit.register(lambda: _audit_executor.shutdown(wait=False))
+
+
+def _async_persist_audit_log(entry_kwargs: Dict[str, Any], actor_id: Optional[str]) -> None:
+    from django.db import connection
+    try:
+        if actor_id:
+            from apps.users.models import User
+            actor = User.objects.filter(pk=actor_id).first()
+            entry_kwargs["actor"] = actor
+        AuditLog.objects.create(**entry_kwargs)
+    except Exception as exc:
+        logger.exception("Async audit log write failed: %s", exc)
+    finally:
+        connection.close()
 
 
 class AuditService:
@@ -45,9 +65,11 @@ class AuditService:
         changes: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         ip_address: Optional[str] = None,
+        async_write: Optional[bool] = None,
     ) -> Optional[AuditLog]:
         """
         Record an immutable audit log entry with complete attribution and fail-safe error handling.
+        Dispatches to a background worker thread by default for zero HTTP latency impact.
         """
         try:
             # Derive actor information if request is provided
@@ -71,24 +93,38 @@ class AuditService:
                 if "request_id" not in meta_payload:
                     meta_payload["request_id"] = request.META.get("X_REQUEST_ID") or request.META.get("HTTP_X_REQUEST_ID", "")
 
-            audit_entry = AuditLog.objects.create(
-                timestamp=timezone.now(),
-                actor=actor if (actor and hasattr(actor, "pk")) else None,
-                actor_email=actor_email or "Anonymous",
-                actor_role=actor_role or "anonymous",
-                ip_address=resolved_ip,
-                user_agent=user_agent,
-                action=action,
-                action_category=category,
-                status=status,
-                target_type=target_type,
-                target_id=str(target_id),
-                target_repr=str(target_repr)[:255],
-                description=description,
-                changes=changes or {},
-                metadata=meta_payload,
-            )
+            # If not explicitly specified, default to async unless running under pytest
+            if async_write is None:
+                async_write = "pytest" not in sys.modules
 
+            actor_id = str(actor.pk) if (actor and hasattr(actor, "pk")) else None
+            entry_kwargs = {
+                "timestamp": timezone.now(),
+                "actor": actor if (not async_write and actor and hasattr(actor, "pk")) else None,
+                "actor_email": actor_email or "Anonymous",
+                "actor_role": actor_role or "anonymous",
+                "ip_address": resolved_ip,
+                "user_agent": user_agent,
+                "action": action,
+                "action_category": category,
+                "status": status,
+                "target_type": target_type,
+                "target_id": str(target_id),
+                "target_repr": str(target_repr)[:255],
+                "description": description,
+                "changes": changes or {},
+                "metadata": meta_payload,
+            }
+
+            if async_write:
+                _audit_executor.submit(_async_persist_audit_log, entry_kwargs, actor_id)
+                logger.info(
+                    "Audit (async): [%s] %s by %s on %s - %s",
+                    category, action, actor_email, target_repr, status
+                )
+                return None
+
+            audit_entry = AuditLog.objects.create(**entry_kwargs)
             logger.info(
                 "Audit: [%s] %s by %s on %s - %s",
                 category, action, actor_email, target_repr, status

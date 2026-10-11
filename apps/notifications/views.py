@@ -5,6 +5,7 @@ from datetime import timedelta
 from django.utils import timezone
 from django.db.models import Q
 from django.http import HttpResponse
+from django.core.cache import cache
 from rest_framework import viewsets, status, mixins
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -124,11 +125,44 @@ class AnnouncementViewSet(viewsets.ModelViewSet):
 
         return qs.order_by("-is_pinned", "-created_at")
 
+    def list(self, request, *args, **kwargs):
+        user = request.user
+        norm_role = normalize_role(user.role) if hasattr(user, "role") else RoleChoice.STUDENT
+        category = request.query_params.get("category", "")
+        search = request.query_params.get("search", "")
+
+        cache_key = f"announcements_list_{norm_role}_{category}_{search}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
+        response = super().list(request, *args, **kwargs)
+        cache.set(cache_key, response.data, timeout=60)
+        return response
+
+    def _invalidate_cache(self):
+        for role in (RoleChoice.STUDENT, RoleChoice.LECTURER, RoleChoice.FINANCE, RoleChoice.SUPER_ADMIN, "all"):
+            for cat in ("", "all", "general", "academic", "examination", "financial", "emergency"):
+                cache.delete(f"announcements_list_{role}_{cat}_")
+
+    def perform_create(self, serializer):
+        super().perform_create(serializer)
+        self._invalidate_cache()
+
+    def perform_update(self, serializer):
+        super().perform_update(serializer)
+        self._invalidate_cache()
+
+    def perform_destroy(self, instance):
+        super().perform_destroy(instance)
+        self._invalidate_cache()
+
     @action(detail=True, methods=["post"], url_path="toggle-pin")
     def toggle_pin(self, request, pk=None):
         announcement = self.get_object()
         announcement.is_pinned = not announcement.is_pinned
         announcement.save(update_fields=["is_pinned"])
+        self._invalidate_cache()
         return Response({"status": "ok", "is_pinned": announcement.is_pinned})
 
 

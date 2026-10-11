@@ -350,14 +350,29 @@ class MultiIdentifierTokenObtainPairSerializer(TokenObtainPairSerializer):
             raise serializers.ValidationError({"detail": "Please provide your identifier (Email, Student ID, or MOH PIN) and password."})
 
         identifier_clean = str(identifier).strip()
-        from django.db.models import Q
+        user = None
 
-        user = User.objects.filter(
-            Q(email__iexact=identifier_clean) |
-            Q(student_id__iexact=identifier_clean) |
-            Q(phone=identifier_clean) |
-            Q(moh_pin__iexact=identifier_clean)
-        ).first()
+        # 1. Fast-path: Email lookup via lowercase unique B-Tree index
+        if "@" in identifier_clean:
+            user = User.objects.select_related("profile").filter(email=identifier_clean.lower()).first()
+
+        # 2. Fast-path: Exact Student ID or MOH PIN lookup via B-Tree index
+        if not user:
+            user = (
+                User.objects.select_related("profile").filter(student_id=identifier_clean).first()
+                or User.objects.select_related("profile").filter(moh_pin=identifier_clean).first()
+                or User.objects.select_related("profile").filter(phone=identifier_clean).first()
+            )
+
+        # 3. Fallback: Case-insensitive search across all identifier fields
+        if not user:
+            from django.db.models import Q
+            user = User.objects.select_related("profile").filter(
+                Q(email__iexact=identifier_clean) |
+                Q(student_id__iexact=identifier_clean) |
+                Q(phone=identifier_clean) |
+                Q(moh_pin__iexact=identifier_clean)
+            ).first()
 
         request = self.context.get("request")
         if not user:

@@ -720,6 +720,12 @@ class ExamClearanceStatusView(APIView):
         else:
             student = user
 
+        # Fast Redis cache lookup (30s TTL per student)
+        cache_key = f"exam_clearance_status_{student.id}"
+        cached_result = cache.get(cache_key)
+        if cached_result is not None:
+            return Response(cached_result)
+
         active_holds = FinancialHold.objects.filter(student=student, is_active=True)
         has_hold = active_holds.exists()
 
@@ -735,7 +741,7 @@ class ExamClearanceStatusView(APIView):
         is_eligible = (not has_hold) and (reg_count > 0)
 
         hold_obj = active_holds.first()
-        return Response({
+        result_data = {
             "is_eligible": is_eligible,
             "has_financial_hold": has_hold,
             "hold_reason": hold_obj.reason if hold_obj else None,
@@ -748,7 +754,9 @@ class ExamClearanceStatusView(APIView):
             "student_name": student.full_name or student.email,
             "program": student.get_program_display() if hasattr(student, "get_program_display") else (student.program or "Nursing"),
             "class_name": student.class_name or "100",
-        })
+        }
+        cache.set(cache_key, result_data, timeout=30)
+        return Response(result_data)
 
 
 class ExamClearancePDFView(APIView):

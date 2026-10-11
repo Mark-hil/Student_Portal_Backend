@@ -67,9 +67,13 @@ class StudentAccountStatement(models.Model):
     src_dues = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("180.00"))
     examination_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("220.00"))
     bursary_aid = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    previous_credit_applied = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"), help_text="Overpayment surplus brought forward from previous semester")
+    previous_arrears_applied = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"), help_text="Unpaid balance brought forward from previous semester")
     total_billed = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("4600.00"))
     total_paid = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
-    balance = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("4600.00"))
+    refunded_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"), help_text="Total refund amount disbursed to student")
+    balance = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("4600.00"), help_text="Outstanding arrears owed by student")
+    credit_balance = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"), help_text="Surplus credit owed to student by the institution")
     currency = models.CharField(max_length=10, default="GHS")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.UNPAID)
     due_date = models.DateField(null=True, blank=True)
@@ -81,12 +85,15 @@ class StudentAccountStatement(models.Model):
         ordering = ["-created_at"]
 
     def recalculate(self):
-        """Update billing totals and status based on completed payments."""
-        self.total_billed = (
-            self.academic_fee + self.ict_library_fee + self.src_dues + self.examination_fee - self.bursary_aid
+        """Update billing totals, balances, and credit surplus based on payments and refunds."""
+        raw_billed = (
+            self.academic_fee + self.ict_library_fee + self.src_dues + self.examination_fee
+            + self.previous_arrears_applied - self.bursary_aid - self.previous_credit_applied
         )
-        if self.total_billed < Decimal("0.00"):
+        if raw_billed < Decimal("0.00"):
             self.total_billed = Decimal("0.00")
+        else:
+            self.total_billed = raw_billed
 
         # Sum completed payments
         completed_total = self.payments.filter(status=Payment.Status.COMPLETED).aggregate(
@@ -94,22 +101,81 @@ class StudentAccountStatement(models.Model):
         )["total"] or Decimal("0.00")
 
         self.total_paid = completed_total
-        self.balance = self.total_billed - self.total_paid
 
-        if self.balance <= Decimal("0.00"):
-            self.balance = Decimal("0.00")
-            self.status = self.Status.PAID
-        elif self.total_paid > Decimal("0.00"):
-            self.status = self.Status.PARTIAL
-        else:
-            if self.due_date and timezone.now().date() > self.due_date:
+        # Net effective payments after refunds
+        net_paid = self.total_paid - self.refunded_amount
+        if net_paid < Decimal("0.00"):
+            net_paid = Decimal("0.00")
+
+        diff = self.total_billed - net_paid
+        if diff > Decimal("0.00"):
+            self.balance = diff
+            self.credit_balance = Decimal("0.00")
+            if self.total_paid > Decimal("0.00"):
+                self.status = self.Status.PARTIAL
+            elif self.due_date and timezone.now().date() > self.due_date:
                 self.status = self.Status.OVERDUE
             else:
                 self.status = self.Status.UNPAID
+        else:
+            self.balance = Decimal("0.00")
+            self.credit_balance = abs(diff)
+            self.status = self.Status.PAID
+
         self.save()
 
     def __str__(self):
-        return f"{self.student.email} - {self.semester} (Balance: GH₵ {self.balance:,.2f})"
+        credit_info = f" | Credit: GH₵ {self.credit_balance:,.2f}" if self.credit_balance > 0 else ""
+        return f"{self.student.email} - {self.semester} (Balance: GH₵ {self.balance:,.2f}{credit_info})"
+
+
+class RefundRequest(models.Model):
+    """Student request for refund of credit balance (overpayment)."""
+    class Channel(models.TextChoices):
+        MOMO = "momo", "Mobile Money"
+        BANK_TRANSFER = "bank_transfer", "Bank Transfer"
+        CASH_CHEQUE = "cash_cheque", "Cheque / Cash at Bursary"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending Review"
+        APPROVED = "approved", "Approved"
+        DISBURSED = "disbursed", "Disbursed / Paid"
+        REJECTED = "rejected", "Rejected"
+
+    student = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="refund_requests"
+    )
+    statement = models.ForeignKey(
+        StudentAccountStatement,
+        on_delete=models.CASCADE,
+        related_name="refund_requests"
+    )
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    currency = models.CharField(max_length=10, default="GHS")
+    channel = models.CharField(max_length=30, choices=Channel.choices, default=Channel.MOMO)
+    account_details = models.CharField(max_length=150, help_text="Mobile money number or bank account number & name")
+    reason = models.TextField(blank=True, default="Semester fee overpayment refund")
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="reviewed_refunds"
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    disbursement_reference = models.CharField(max_length=100, blank=True)
+    admin_notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Refund #{self.id} - {self.student.email} - GH₵ {self.amount:,.2f} ({self.status})"
 
 
 class Payment(models.Model):

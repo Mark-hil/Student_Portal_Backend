@@ -8,7 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Install runtime dependencies (libpq5 for PostgreSQL)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 curl && rm -rf /var/lib/apt/lists/*
+    libpq5 curl && rm -rf /var/lib/apt/lists/* \
+    && echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
 
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt

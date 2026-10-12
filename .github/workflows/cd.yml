@@ -15,10 +15,80 @@ concurrency:
 
 jobs:
   # ─────────────────────────────────────────────────────────────
-  # Continuous Deployment: Build, Smoke Test & Publish
+  # Stage 1: Build Docker Container Image
   # ─────────────────────────────────────────────────────────────
-  build-and-publish:
-    name: Build, Verify & Publish Backend to Docker Hub
+  build-image:
+    name: Stage 1 — Build Docker Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image Locally
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: student-portal-backend:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Save Docker Image Archive
+        run: |
+          docker save student-portal-backend:test -o /tmp/backend-image.tar
+
+      - name: Upload Docker Image Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-docker-image
+          path: /tmp/backend-image.tar
+          retention-days: 1
+
+  # ─────────────────────────────────────────────────────────────
+  # Stage 2: Container Smoke & Runtime Verification
+  # ─────────────────────────────────────────────────────────────
+  test-image:
+    name: Stage 2 — Smoke Test Built Image
+    needs: [build-image]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Docker Image Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-docker-image
+          path: /tmp
+
+      - name: Load Docker Image
+        run: |
+          docker load --input /tmp/backend-image.tar
+          docker images
+
+      - name: Verify Python & Gunicorn Runtime Entrypoints
+        run: |
+          echo "Verifying Python runtime inside container..."
+          docker run --rm --entrypoint python student-portal-backend:test -V
+          echo "Verifying Gunicorn server inside container..."
+          docker run --rm --entrypoint gunicorn student-portal-backend:test --version
+
+      - name: Verify Django System Check Inside Container
+        run: |
+          echo "Verifying Django system check inside container..."
+          docker run --rm \
+            -e SECRET_KEY=ci-pre-push-test-secret-key \
+            -e DJANGO_SETTINGS_MODULE=config.settings.development \
+            student-portal-backend:test python manage.py check
+          echo "✅ Container smoke tests passed! Image is verified healthy."
+
+  # ─────────────────────────────────────────────────────────────
+  # Stage 3: Publish Verified Image to Docker Registry
+  # ─────────────────────────────────────────────────────────────
+  publish-image:
+    name: Stage 3 — Publish to Docker Hub
+    needs: [test-image]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -50,41 +120,20 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=ref,event=tag
 
-      - name: Build Docker Image (Local Test Target)
-        uses: docker/build-push-action@v5
+      - name: Download Verified Docker Image Artifact
+        uses: actions/download-artifact@v4
         with:
-          context: .
-          file: ./Dockerfile
-          load: true
-          tags: student-portal-backend:pre-push-test
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          name: backend-docker-image
+          path: /tmp
 
-      # ── PRE-PUSH CONTAINER SMOKE TESTS ──────────────────────────
-      - name: Run Container Image Smoke Tests
+      - name: Load and Push Image to Docker Hub
         run: |
-          echo "Verifying Python runtime and entrypoints inside container..."
-          docker run --rm --entrypoint python student-portal-backend:pre-push-test -V
-          docker run --rm --entrypoint gunicorn student-portal-backend:pre-push-test --version
-          
-          echo "Verifying Django system check inside container..."
-          docker run --rm \
-            -e SECRET_KEY=ci-pre-push-test-secret-key \
-            -e DJANGO_SETTINGS_MODULE=config.settings.development \
-            student-portal-backend:pre-push-test python manage.py check
-            
-          echo "✅ Container smoke tests passed! Image is verified healthy."
-
-      # ── PUSH VERIFIED IMAGE TO DOCKER HUB ────────────────────────
-      - name: Push Verified Image to Docker Hub
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
+          docker load --input /tmp/backend-image.tar
+          for tag in ${{ steps.meta.outputs.tags }}; do
+            echo "Tagging and pushing $tag..."
+            docker tag student-portal-backend:test "$tag"
+            docker push "$tag"
+          done
 
       - name: Publish Deployment Summary to GitHub Actions
         run: |

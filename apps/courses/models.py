@@ -235,3 +235,14 @@ class Enrollment(models.Model):
 
     def __str__(self):
         return f"{self.student.email} → {self.course.code} [{self.status}]"
+
+
+from django.db.models.signals import post_save, post_delete
+from django.dispatch import receiver
+from django.core.cache import cache
+
+
+@receiver([post_save, post_delete], sender=Enrollment)
+def invalidate_clearance_cache_on_enrollment(sender, instance, **kwargs):
+    if getattr(instance, "student_id", None):
+        cache.delete(f"exam_clearance_status_{instance.student_id}")

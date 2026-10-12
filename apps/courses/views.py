@@ -721,10 +721,15 @@ class ExamClearanceStatusView(APIView):
             student = user
 
         # Fast Redis cache lookup (30s TTL per student)
+        refresh = (
+            request.query_params.get("refresh") in ("true", "1")
+            or request.headers.get("Cache-Control") == "no-cache"
+        )
         cache_key = f"exam_clearance_status_{student.id}"
-        cached_result = cache.get(cache_key)
-        if cached_result is not None:
-            return Response(cached_result)
+        if not refresh:
+            cached_result = cache.get(cache_key)
+            if cached_result is not None:
+                return Response(cached_result)
 
         active_holds = FinancialHold.objects.filter(student=student, is_active=True)
         has_hold = active_holds.exists()
@@ -751,6 +756,7 @@ class ExamClearanceStatusView(APIView):
             "total_credits": total_credits,
             "semester": statement.semester if statement else "2024/2025 Academic Year",
             "student_id": student.student_id or "",
+            "moh_pin": getattr(student, "moh_pin", "") or "",
             "student_name": student.full_name or student.email,
             "program": student.get_program_display() if hasattr(student, "get_program_display") else (student.program or "Nursing"),
             "class_name": student.class_name or "100",

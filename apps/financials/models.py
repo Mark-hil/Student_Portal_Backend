@@ -252,3 +252,26 @@ class FinancialHold(models.Model):
     def __str__(self):
         state = "ACTIVE" if self.is_active else "CLEARED"
         return f"Hold for {self.student.email} [{state}] - GH₵ {self.amount_due:,.2f}"
+
+
+from django.db.models.signals import post_save, post_delete
+from django.dispatch import receiver
+from django.core.cache import cache
+
+
+@receiver([post_save, post_delete], sender=FinancialHold)
+def invalidate_clearance_cache_on_hold(sender, instance, **kwargs):
+    if getattr(instance, "student_id", None):
+        cache.delete(f"exam_clearance_status_{instance.student_id}")
+
+
+@receiver([post_save, post_delete], sender=StudentAccountStatement)
+def invalidate_clearance_cache_on_statement(sender, instance, **kwargs):
+    if getattr(instance, "student_id", None):
+        cache.delete(f"exam_clearance_status_{instance.student_id}")
+
+
+@receiver([post_save, post_delete], sender=Payment)
+def invalidate_clearance_cache_on_payment(sender, instance, **kwargs):
+    if getattr(instance, "student_id", None):
+        cache.delete(f"exam_clearance_status_{instance.student_id}")

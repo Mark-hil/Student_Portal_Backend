@@ -277,7 +277,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   docker-build-check:
     name: Backend Docker Image Build Check
-    needs: migrations-check
+    needs: [coverage-report]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -301,7 +301,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   ci-pipeline-complete:
     name: CI Pipeline Complete
-    needs: [coverage-report, docker-build-check]
+    needs: [docker-build-check]
     runs-on: ubuntu-latest
     steps:
       - name: Confirm All Checks Passed
